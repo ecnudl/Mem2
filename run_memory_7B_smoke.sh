@@ -7,7 +7,7 @@ NGPUS_PER_NODE=1
 PROJ_ROOT=/home/admin123/dl/MemAgent/outputs
 DATASET_ROOT=/home/admin123/dl/MemAgent/taskutils/memory_data
 
-MODEL_PATH=Qwen/Qwen2.5-7B-Instruct
+MODEL_PATH=/mnt/ssd2/models/Qwen2.5-7B-Instruct
 VAL_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_dev_20.parquet"
 TRAIN_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_train_100.parquet"
 EXP=memory_agent/7B_smoke

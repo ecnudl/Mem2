@@ -239,7 +239,7 @@ recurrent:
     config:
       ~
   memory:
-    path: "recurrent/impls/memory.py"
+    path: "/home/admin123/dl/MemAgent/recurrent/impls/memory.py"
     name: REGISTER
     async_path: "recurrent/impls/async_memory.py"
     async_name: REGISTER
