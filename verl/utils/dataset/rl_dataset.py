@@ -105,11 +105,10 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.data_files:
-            #  dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
-            # read parquet files and cache
-            if parquet_file.endswith('.parquet'):
-                dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
-            elif parquet_file.endswith('.jsonl') or parquet_file.endswith('.json'):
+            # read parquet/json files and cache
+            if parquet_file.endswith(".parquet"):
+                dataframe = datasets.Dataset.from_parquet(parquet_file)
+            elif parquet_file.endswith(".jsonl") or parquet_file.endswith(".json"):
                 dataframe = datasets.load_dataset("json", data_files=parquet_file)["train"]
             else:
                 raise ValueError(f'Unknown file format: {parquet_file}, should be parquet or jsonl')

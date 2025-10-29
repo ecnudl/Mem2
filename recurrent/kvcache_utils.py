@@ -130,3 +130,36 @@ def concat_past_kv(
         merged.append(KVCacheItem(key=key, value=value))
 
     return _pack_kv(tuple(merged), current or external)
+
+
+def truncate_past_kv(
+    past_kv: LayerwiseKV,
+    max_length: Optional[int],
+) -> Optional[Union[Tuple[KVTuple, ...], List[KVTuple]]]:
+    """
+    Trim cached KV tensors so that no layer keeps more than ``max_length`` sequence steps.
+
+    Args:
+        past_kv: Layer-wise KV cache produced by the model.
+        max_length: Maximum number of timesteps to retain. ``None``/``<=0`` disables trimming.
+
+    Returns:
+        Cache with the same container type as ``past_kv`` but clipped to the requested length.
+    """
+    if max_length is None or max_length <= 0:
+        return past_kv
+
+    normalized = _normalize_kv(past_kv)
+    if not normalized:
+        return past_kv
+
+    trimmed: List[KVCacheItem] = []
+    for item in normalized:
+        if item.seq_len <= max_length:
+            trimmed.append(item)
+            continue
+        key = item.key[..., -max_length:, :].contiguous()
+        value = item.value[..., -max_length:, :].contiguous()
+        trimmed.append(KVCacheItem(key=key, value=value))
+
+    return _pack_kv(tuple(trimmed), past_kv)
