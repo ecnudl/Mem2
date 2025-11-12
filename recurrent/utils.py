@@ -200,6 +200,43 @@ def pad_tensor_list_to_length(response: List[torch.LongTensor], pad_token_id, ma
     else:
         return padded_response
 
+
+def enforce_left_padding(
+    input_ids: torch.Tensor,
+    attention_masks: torch.Tensor,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Ensure each sequence is left padded so the last column remains a real token.
+
+    Returns the possibly updated tensors plus the number of rows that were fixed.
+    """
+    if input_ids.numel() == 0 or attention_masks.numel() == 0:
+        return input_ids, attention_masks, 0
+
+    trailing_pad = attention_masks[:, -1] == 0
+    if not torch.any(trailing_pad):
+        return input_ids, attention_masks, 0
+
+    fixed = trailing_pad.nonzero(as_tuple=False).flatten()
+    updated_input_ids = input_ids.clone()
+    updated_attention_masks = attention_masks.clone()
+    for idx in fixed.tolist():
+        valid_mask = attention_masks[idx].bool()
+        valid_tokens = input_ids[idx][valid_mask]
+
+        padded_row = torch.full_like(updated_input_ids[idx], pad_token_id)
+        if valid_tokens.numel() > 0:
+            padded_row[-valid_tokens.size(0):] = valid_tokens
+        updated_input_ids[idx] = padded_row
+
+        mask_row = torch.zeros_like(updated_attention_masks[idx])
+        if valid_tokens.numel() > 0:
+            mask_row[-valid_tokens.size(0):] = 1
+        updated_attention_masks[idx] = mask_row
+
+    return updated_input_ids, updated_attention_masks, fixed.numel()
+
 def unpad(tokenizer, tensor: torch.Tensor, remove_eos: bool = False) -> np.ndarray:
     """Unpad tensor. Remove eos if specified"""
     if len(tensor.shape) == 1:

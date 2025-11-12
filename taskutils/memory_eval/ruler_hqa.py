@@ -24,8 +24,8 @@ import string
 from collections import Counter
 from datasets import load_dataset, concatenate_datasets
 
-from utils import extract_solution,update_answer
-from utils.envs import DATAROOT
+from utils import extract_solution, update_answer
+from utils import envs
 
 
 def calc_metrics(predictions, goldens):
@@ -45,7 +45,11 @@ def get_pred(data, args, out_file):
     if "gpt" in model or "o1" in model or "o3" in model or "o4" in model or "gemini" in model or "claude" in model:
         tokenizer = tiktoken.encoding_for_model("gpt-4o-2024-08-06")
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
+        tokenizer_target = args.tokenizer or args.model
+        tokenizer_kwargs = {"trust_remote_code": True}
+        if os.path.exists(tokenizer_target):
+            tokenizer_kwargs["local_files_only"] = True
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_target, **tokenizer_kwargs)
     if args.api == "openai":
         from utils.openai_api import async_query_llm
         from utils import extract_answer
@@ -109,7 +113,7 @@ def main():
     out_file = os.path.join(args.save_dir, args.save_file + ".jsonl")
 
     dataset = concatenate_datasets([
-            load_dataset("json", data_files=f"{DATAROOT}/eval_{args.length}.json", split="train"),
+            load_dataset("json", data_files=f"{envs.DATAROOT}/eval_{args.length}.json", split="train"),
         ])
         
     print(f"original data len {len(dataset)}")
@@ -143,14 +147,18 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--length", type=int, default=50, choices=[50, 100, 200, 400, 800, 1600, 3200, 6400])
+    parser.add_argument("--length", type=int, default=100, choices=[50, 100, 200, 400, 800, 1600, 3200, 6400])
     parser.add_argument("--save_dir", "-s", type=str, default="results/ruler_hqa")
     parser.add_argument("--save_file", "-f", type=str, default="Qwen2.5-7B-Instruct-recurrent")
     parser.add_argument("--model", "-m", type=str, default="Qwen2.5-7B-Instruct")
-    parser.add_argument("--tokenizer", "-t", type=str, default="/mnt/hdfs/hongli/model/Qwen2.5-7B-Instruct")
+    parser.add_argument("--tokenizer", "-t", type=str, default="Qwen2.5-7B-Instruct")
     parser.add_argument("--n_proc", "-n", type=int, default=64)
     parser.add_argument("--api", "-a", type=str, default="recurrent")
     parser.add_argument("--sampling", "-p", type=int, default=1)
+    parser.add_argument("--url", type=str, default="https://www.dmxapi.cn/v1")
+    parser.add_argument("--api_key", type=str, default="sk-HG6X66wxKNXtnDPjYhOYZHw7BOdHgqA5sM43DEMQPPztG332")
     parser.add_argument('--force', action='store_true', help='force to overrite')
     args = parser.parse_args()
+    if args.url or args.api_key:
+        envs.override_endpoint(args.url, args.api_key)
     main()

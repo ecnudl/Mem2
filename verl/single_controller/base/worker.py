@@ -210,8 +210,15 @@ class Worker(WorkerHelper):
 
     def get_cuda_visible_devices(self):
         import os
+        import torch
 
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "not set")
+        if cuda_visible_devices != "not set" and hasattr(self, '_rank'):
+            print(f"[Worker {self._rank}] CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
+            if torch.cuda.is_available():
+                print(f"[Worker {self._rank}] torch.cuda.device_count()={torch.cuda.device_count()}")
+                print(f"[Worker {self._rank}] torch.cuda.current_device()={torch.cuda.current_device()}")
+                print(f"[Worker {self._rank}] torch.cuda.get_device_name()={torch.cuda.get_device_name()}")
         return cuda_visible_devices
 
     @property

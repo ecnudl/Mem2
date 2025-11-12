@@ -1,4 +1,15 @@
-def compute_score(solution_str, ground_truth: list) -> float: 
+def compute_score(solution_str, ground_truth) -> float:
+    # Handle both string and list formats for ground_truth
+    if isinstance(ground_truth, str):
+        # If ground_truth is a string, split by newlines to handle multi-answer cases
+        # For simple cases like "yes", it will be a single-element list
+        ground_truth_list = [gt.strip() for gt in ground_truth.split('\n') if gt.strip()]
+        if not ground_truth_list:
+            # Fallback: use original string if split resulted in empty list
+            ground_truth = [ground_truth]
+        else:
+            ground_truth = ground_truth_list
+
     def compute_score_single(solution_str, ground_truth) -> float:
         ground_truth = ground_truth.lower()
 
@@ -11,12 +22,35 @@ def compute_score(solution_str, ground_truth: list) -> float:
                     retval = 1.
         except Exception as e:
             print(e)
+        # Fallback: if no boxed answer matched, try plain yes/no to avoid 0 reward due to formatting only
+        if retval == 0.:
+            try:
+                # prioritize the last explicit yes/no in the tail
+                tail = solution_str[-200:].lower()
+                candidate = None
+                # simple heuristic: prefer the last occurrence
+                yes_idx = tail.rfind("yes")
+                no_idx = tail.rfind("no")
+                if yes_idx == -1 and no_idx == -1:
+                    candidate = None
+                elif yes_idx > no_idx:
+                    candidate = "yes"
+                else:
+                    candidate = "no"
+                if candidate is not None and is_equiv(
+                        candidate,
+                        ground_truth,
+                ):
+                    retval = 1.0
+            except Exception:
+                pass
         return retval
     solution_str = solution_str[-300:].lower()
     return max(compute_score_single(solution_str, gt) for gt in ground_truth)
 
 
-# string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
+# string normalization from
+# https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py
 def is_equiv(str1, str2, verbose=False):
     if str1 is None and str2 is None:
         print("WARNING: Both None")
@@ -76,6 +110,7 @@ def last_boxed_only_string(string):
         retval = string[idx:right_brace_idx + 1]
 
     return retval
+
 
 def strip_string(string):
     # linebreaks

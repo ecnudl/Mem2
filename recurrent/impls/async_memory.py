@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List, Optional, Tuple, Union, Dict
 from uuid import uuid4
 
@@ -37,7 +38,19 @@ class AsyncMemoryDataset(RDataset):
     ):
         if data_config.truncation != 'center':
             raise ValueError('MemoryDataset only support center truncation')
-        data_config.max_prompt_length=recurrent_config.max_chunks * recurrent_config.chunk_size
+        auto_max_prompt_length = recurrent_config.max_chunks * recurrent_config.chunk_size
+        configured_max_prompt_length = data_config.get("max_prompt_length", None)
+        if configured_max_prompt_length is None:
+            data_config.max_prompt_length = auto_max_prompt_length
+        else:
+            if configured_max_prompt_length > auto_max_prompt_length:
+                logger.warning(
+                    "data.max_prompt_length=%s exceeds recurrent.max_chunks*chunk_size=%s, "
+                    "clamping to avoid oversized contexts.",
+                    configured_max_prompt_length,
+                    auto_max_prompt_length,
+                )
+            data_config.max_prompt_length = min(configured_max_prompt_length, auto_max_prompt_length)
         self.context_key = recurrent_config.context_key
         super().__init__(
             recurrent_config=recurrent_config,
@@ -54,6 +67,13 @@ class AsyncMemoryDataset(RDataset):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict: dict = self.dataframe[item]
+        if "data_source" not in row_dict:
+            default_data_source = self.config.get("default_data_source")
+            if default_data_source is None:
+                first_file = self.data_files[0] if self.data_files else ""
+                default_data_source = os.path.splitext(os.path.basename(first_file))[0] or "unknown"
+            row_dict["data_source"] = default_data_source
+        self._ensure_reward_metadata(row_dict)
 
         chat = row_dict.pop(self.prompt_key)
         context = row_dict.pop(self.context_key)

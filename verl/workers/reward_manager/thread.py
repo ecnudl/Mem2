@@ -208,7 +208,20 @@ class ThreadRewardManager:
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch['responses'] 
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            raw_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            # convert tensor sums to python ints for downstream indexing
+            valid_response_length = int(raw_response_length.item() if hasattr(raw_response_length, "item") else raw_response_length)
+            max_available_tokens = response_ids.shape[-1]
+            if valid_response_length < 1:
+                logger.warning("empty decoded response detected, forcing valid_response_length to 1 for reward alignment")
+                valid_response_length = 1
+            if valid_response_length > max_available_tokens:
+                logger.warning(
+                    "valid_response_length=%s exceeds available response tokens (%s); clamping to fit.",
+                    valid_response_length,
+                    max_available_tokens,
+                )
+                valid_response_length = max_available_tokens
             valid_response_lengths.append(valid_response_length)
             valid_response_ids = response_ids[:valid_response_length]
 
@@ -243,7 +256,8 @@ class ThreadRewardManager:
                     reward_extra_info[key].append(value)
             else:
                 score = result
-            reward_tensor[i, valid_response_length - 1] = score
+            reward_index = max(valid_response_length - 1, 0)
+            reward_tensor[i, reward_index] = score
     
         print(sequences_strs[0])
         print(reward_tensor[0].sum())

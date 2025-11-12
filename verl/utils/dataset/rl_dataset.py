@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import json
 import logging
 import os
 import re
@@ -92,8 +93,10 @@ class RLHFDataset(Dataset):
         self.need_tools_kwargs = config.get("need_tools_kwargs", False)
         self.filter_prompts = config.get("filter_prompts", True)
         self.serialize_dataset = False
+        self.ground_truth_key = config.get("ground_truth_key", "solution")
         self._download()
         self._read_files_and_tokenize()
+        self.default_data_source = config.get("default_data_source", None)
 
     def _download(self, use_origin_parquet=False):
         from verl.utils.fs import copy_to_local
@@ -128,6 +131,35 @@ class RLHFDataset(Dataset):
             )
 
             print(f"filter dataset len: {len(self.dataframe)}")
+
+    def _normalize_ground_truth(self, value) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple, set)):
+            normalized = [self._normalize_ground_truth(v) for v in value]
+            normalized = [v for v in normalized if v not in (None, "")]
+            if not normalized:
+                return None
+            return "\n".join(normalized)
+        if isinstance(value, dict):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(value)
+        return str(value)
+
+    def _ensure_reward_metadata(self, row_dict: dict) -> None:
+        ground_truth_raw = row_dict.get(self.ground_truth_key)
+        ground_truth = self._normalize_ground_truth(ground_truth_raw)
+        if ground_truth is None:
+            return
+
+        reward_model = row_dict.get("reward_model")
+        if not isinstance(reward_model, dict):
+            reward_model = {}
+        if not reward_model.get("ground_truth"):
+            reward_model["ground_truth"] = ground_truth
+        row_dict["reward_model"] = reward_model
 
     def resume_dataset_state(self):
         self.serialize_dataset = not hasattr(self, "original_data_files")
@@ -165,6 +197,13 @@ class RLHFDataset(Dataset):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict: dict = self.dataframe[item]
+        if "data_source" not in row_dict:
+            default_data_source = self.default_data_source
+            if default_data_source is None:
+                first_file = self.data_files[0] if self.data_files else ""
+                default_data_source = os.path.splitext(os.path.basename(first_file))[0] or "unknown"
+            row_dict["data_source"] = default_data_source
+        self._ensure_reward_metadata(row_dict)
         messages = self._build_messages(row_dict)
         model_inputs = {}
 

@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 from uuid import uuid4
@@ -59,7 +60,21 @@ class MemoryDataset(RDataset):
     ):
         if data_config.truncation != 'center':
             raise ValueError('MemoryDataset only support center truncation')
-        data_config.max_prompt_length=recurrent_config.max_chunks * recurrent_config.chunk_size
+
+        auto_max_prompt_length = recurrent_config.max_chunks * recurrent_config.chunk_size
+        configured_max_prompt_length = data_config.get("max_prompt_length", None)
+        if configured_max_prompt_length is None:
+            data_config.max_prompt_length = auto_max_prompt_length
+        else:
+            if configured_max_prompt_length > auto_max_prompt_length:
+                logger.warning(
+                    "data.max_prompt_length=%s exceeds recurrent.max_chunks*chunk_size=%s, "
+                    "clamping to avoid oversized contexts.",
+                    configured_max_prompt_length,
+                    auto_max_prompt_length,
+                )
+            data_config.max_prompt_length = min(configured_max_prompt_length, auto_max_prompt_length)
+
         self.context_key = recurrent_config.context_key
         super().__init__(
             recurrent_config=recurrent_config,
@@ -75,6 +90,13 @@ class MemoryDataset(RDataset):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict: dict = self.dataframe[item]
+        if "data_source" not in row_dict:
+            default_data_source = self.config.get("default_data_source")
+            if default_data_source is None:
+                first_file = self.data_files[0] if self.data_files else ""
+                default_data_source = os.path.splitext(os.path.basename(first_file))[0] or "unknown"
+            row_dict["data_source"] = default_data_source
+        self._ensure_reward_metadata(row_dict)
 
         chat = row_dict.pop(self.prompt_key)
         context = row_dict.pop(self.context_key)
@@ -167,10 +189,15 @@ class MemoryAgent(RAgent):
         self.sample_index_list = [] # map each turn in final to the sample id in the original batch
         
         self.ctx_length = gen_batch.batch['context_length'] # if all context is used, then the sample will no more be active
+        self.allowed_ctx_length = self.ctx_length
+        if getattr(self.config, "max_chunks", 0) > 0:
+            limit = self.config.max_chunks * self.config.chunk_size
+            limit_tensor = torch.full_like(self.ctx_length, limit)
+            self.allowed_ctx_length = torch.minimum(self.ctx_length, limit_tensor)
         self.bsz = len(self.ctx_length)
         self.memory = np.empty(self.bsz, dtype=object)
         self.is_final = False
-    
+
     @override
     def action(self) -> Tuple[List[torch.Tensor], dict]:
         # suppose 0 is pad_token_id
@@ -184,7 +211,7 @@ class MemoryAgent(RAgent):
         # [1,2]  -format-> [t0,p1,p1,t1, m,t2, 1, 2,t3] -pad2Dlist2Tendors->   [ 0, 0,t0,p1,p1,t1, m,t2, 1, 2,t3]
         # [1,0]            [t0,p2,p2,p3,t1, m,t2, 1,t3]                        [ 0, 0,t0,p2,p2,p3,t1, m,t2, 1,t3]
         # get mask & positionids
-        active_mask = self.ctx_length > self.step * self.config.chunk_size
+        active_mask = self.allowed_ctx_length > self.step * self.config.chunk_size
         self.active_mask = active_mask
         gen_batch = self.gen_batch
         # if all context is used, and its not done, then it will be the final turn for this batch
@@ -252,6 +279,7 @@ class MemoryAgent(RAgent):
     def end(self):
         del self.gen_batch
         del self.ctx_length
+        del self.allowed_ctx_length
         del self.meta_info
         del self.memory
         del self.messages

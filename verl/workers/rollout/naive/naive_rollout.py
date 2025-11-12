@@ -20,6 +20,8 @@ The output will contain
 4. log_probs
 """
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
@@ -48,24 +50,47 @@ class NaiveRollout(BaseRollout):
         self.module = module
 
     @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(
+        self,
+        prompts: DataProto,
+        pad_to: Optional[int] = None,
+        **generation_kwargs,
+    ) -> DataProto:
         """Generate sequences"""
+        meta_info = prompts.meta_info
+        if pad_to is not None:
+            prompts.meta_info["pad_to"] = pad_to
+        if generation_kwargs:
+            merged_kwargs = dict(prompts.meta_info.get("generation_kwargs", {}))
+            merged_kwargs.update(generation_kwargs)
+            prompts.meta_info["generation_kwargs"] = merged_kwargs
+
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask
         position_ids = prompts.batch["position_ids"]
 
         # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
+        eos_token_id = meta_info["eos_token_id"]
 
         batch_size = idx.size(0)
         prompt_length = idx.size(1)
+
+        generation_kwargs = meta_info.get("generation_kwargs", {})
+        response_steps = generation_kwargs.get("max_tokens", self.config.response_length)
+        temperature = meta_info.get("temperature", self.config.temperature)
+        if temperature == 0:
+            temperature = 1.0
+        do_sample = meta_info.get("do_sample", self.config.do_sample)
+        top_k = generation_kwargs.get("top_k", self.config.top_k)
+        if top_k is not None and top_k <= 0:
+            top_k = None
 
         self.module.eval()
 
         prev_attention_mask = torch.ones(size=(batch_size, 1), dtype=attention_mask.dtype, device=attention_mask.device)
 
         logits_lst = []
-        for _ in range(self.config.response_length):
+        for _ in range(response_steps):
             # if the sequence context is growing too long we must crop it at block_size
             # idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             idx_cond = idx
@@ -74,15 +99,16 @@ class NaiveRollout(BaseRollout):
             output = self.module(input_ids=idx_cond, attention_mask=attention_mask, position_ids=position_ids)
             logits = output.logits
             # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / self.config.temperature  # (bs, vocab_size)
+            logits = logits[:, -1, :] / temperature  # (bs, vocab_size)
             # optionally crop the logits to only the top k options
-            if self.config.top_k is not None:
-                v, _ = torch.topk(logits, min(self.config.top_k, logits.size(-1)))
+            if top_k is not None:
+                k = min(top_k, logits.size(-1))
+                v, _ = torch.topk(logits, k)
                 logits[logits < v[:, [-1]]] = -float("Inf")
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
-            if self.config.do_sample:
+            if do_sample:
                 idx_next = torch.multinomial(probs, num_samples=1)
             else:
                 idx_next = torch.argmax(probs, dim=-1, keepdim=True)
@@ -100,12 +126,54 @@ class NaiveRollout(BaseRollout):
             logits_lst.append(logits)
 
         logits = torch.stack(logits_lst, dim=1)  # (bs, response_length, vocab_size)
-        prompts = idx[:, :prompt_length]  # (bs, prompt_length)
+        prompts_out = idx[:, :prompt_length]  # (bs, prompt_length)
         response = idx[:, prompt_length:]  # (bs, response_length)
         log_probs = logprobs_from_logits(logits=logits, labels=response)
+
+        pad_to = meta_info.get("pad_to")
+        pad_token_id = meta_info.get("pad_token_id")
+        if (
+            pad_to is not None
+            and pad_token_id is not None
+            and response.size(1) < pad_to
+        ):
+            pad_len = pad_to - response.size(1)
+            pad_tokens = torch.full(
+                (batch_size, pad_len),
+                pad_token_id,
+                dtype=response.dtype,
+                device=response.device,
+            )
+            response = torch.cat((response, pad_tokens), dim=1)
+            zero_log_probs = torch.zeros(
+                (batch_size, pad_len),
+                dtype=log_probs.dtype,
+                device=log_probs.device,
+            )
+            log_probs = torch.cat((log_probs, zero_log_probs), dim=1)
+            idx = torch.cat((idx, pad_tokens), dim=1)
+
+            pad_mask = torch.zeros(
+                (batch_size, pad_len),
+                dtype=attention_mask.dtype,
+                device=attention_mask.device,
+            )
+            attention_mask = torch.cat((attention_mask, pad_mask), dim=-1)
+
+            delta_position_id = torch.arange(
+                1,
+                pad_len + 1,
+                device=position_ids.device,
+                dtype=position_ids.dtype,
+            ).unsqueeze(0).repeat(batch_size, 1)
+            position_ids = torch.cat(
+                (position_ids, position_ids[:, -1:] + delta_position_id), dim=-1
+            )
+
         batch = TensorDict(
             {
-                "input_ids": prompts,
+                "input_ids": prompts_out,
+                "prompts": prompts_out,
                 "responses": response,
                 "sequences": idx,
                 "old_log_probs": log_probs,

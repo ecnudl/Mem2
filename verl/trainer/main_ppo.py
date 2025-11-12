@@ -75,8 +75,14 @@ def run_ppo(config) -> None:  # PPO 训练主流程
     if not ray.is_initialized():  # 若 Ray 尚未初始化则在本进程内启动
         # this is for local ray cluster
         # 本地模式下初始化 Ray 集群
+        # 传递CUDA_VISIBLE_DEVICES到Ray worker
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        runtime_env_vars = {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
+        if cuda_visible_devices:
+            runtime_env_vars["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+            runtime_env_vars["PYTORCH_CUDA_ALLOC_CONF"] = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         ray.init(  # 设置 Ray 本地集群的运行时环境
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},  # 控制关键环境变量
+            runtime_env={"env_vars": runtime_env_vars},  # 控制关键环境变量
             num_cpus=config.ray_init.num_cpus,  # 根据配置分配 CPU 资源
         )
 

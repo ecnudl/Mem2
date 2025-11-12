@@ -1,9 +1,8 @@
-import os
 from openai import OpenAI
 import time
 
 
-from .envs import URL, API_KEY, MAX_INPUT_LEN, MAX_OUTPUT_LEN
+from . import envs
 
 template_0shot = """Please read the following text and answer the question below.
 
@@ -16,8 +15,8 @@ $Q$
 Format your response as follows: "Therefore, the answer is (insert answer here)"."""
 from .aio import get_async_client
 async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, stop=None):
-    max_input_tokens=MAX_INPUT_LEN
-    max_new_tokens=MAX_OUTPUT_LEN
+    max_input_tokens = envs.MAX_INPUT_LEN
+    max_new_tokens = envs.MAX_OUTPUT_LEN
     context = item["context"]
     prompt = template_0shot.replace('$DOC$', context.strip()).replace('$Q$', item['input'].strip())
     session = await get_async_client()
@@ -29,8 +28,8 @@ async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, s
             prompt = tokenizer.decode(input_ids, skip_special_tokens=True)
         try:
             async with session.post(
-                url=URL + "/chat/completions",
-                headers={"Authorization": f"Bearer {API_KEY}"},
+                url=envs.URL + "/chat/completions",
+                headers={"Authorization": f"Bearer {envs.API_KEY}"},
                 json=dict(model=model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=temperature,
@@ -54,8 +53,8 @@ async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, s
 
 def query_llm(prompt, model, tokenizer, temperature=0.7, top_p=0.95, max_input_tokens=120000, max_new_tokens=10000, stop=None):
     client = OpenAI(
-        base_url=URL,
-        api_key=API_KEY,
+        base_url=envs.URL,
+        api_key=envs.API_KEY,
         timeout=1800
     )
     max_len = max_input_tokens

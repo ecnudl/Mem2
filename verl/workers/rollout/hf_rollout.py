@@ -40,8 +40,7 @@ class HFRollout(BaseRollout):
         super().__init__()
         self.config = config
         self.module = module
-
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: DataProto, pad_to=None, **_ignored_kwargs) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
@@ -104,7 +103,19 @@ class HFRollout(BaseRollout):
 
         if isinstance(self.module, FSDP):
             # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+            # When using param_offload, summon_full_params will automatically move params to GPU
+            try:
+                param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+            except AssertionError as e:
+                if "compute device" in str(e) and "cpu" in str(e).lower():
+                    # If params are on CPU due to offload, try to move them first
+                    # This should not happen with proper FSDP offload, but handle it gracefully
+                    raise RuntimeError(
+                        "FSDP parameters are on CPU but expected on GPU. "
+                        "This may be due to param_offload configuration. "
+                        "Try disabling param_offload or ensure FSDP is properly configured."
+                    ) from e
+                raise
         with param_ctx, torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             output = self.module.generate(
                 input_ids=idx,

@@ -41,6 +41,7 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         name (str): The name of the tokenizer.
         correct_pad_token (bool): Whether to correct the pad token id.
         correct_gemma2 (bool): Whether to correct the gemma2 tokenizer.
+        padding_side (str | None, optional): Side to apply padding. Defaults to "left".
 
     Returns:
 
@@ -55,7 +56,10 @@ def hf_tokenizer(name_or_path, correct_pad_token=True, correct_gemma2=True, **kw
         warnings.warn("Found gemma-2-2b-it tokenizer. Set eos_token and eos_token_id to <end_of_turn> and 107.", stacklevel=1)
         kwargs["eos_token"] = "<end_of_turn>"
         kwargs["eos_token_id"] = 107
+    padding_side = kwargs.pop("padding_side", "left")
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
+    if padding_side is not None:
+        tokenizer.padding_side = padding_side
     if correct_pad_token:
         set_pad_token_id(tokenizer)
     return tokenizer

@@ -483,6 +483,7 @@ class RayPPOTrainer:
 
     def _create_dataloader(self):
         # TODO: we have to make sure the batch size is divisible by the dp size
+        print("[DataLoader] 开始创建训练数据集...")
         if self.config.recurrent.enable:
             self.train_dataset = self.recurrent_register.dataset_cls(
                 recurrent_config=self.recurrent_config,
@@ -491,6 +492,7 @@ class RayPPOTrainer:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
+            print(f"[DataLoader] 训练数据集创建完成，样本数: {len(self.train_dataset)}")
         else:    
             from verl.utils.import_utils import load_extern_type
             if "custom_cls" in self.config.data and self.config.data.custom_cls.get("path", None) is not None:
@@ -517,13 +519,16 @@ class RayPPOTrainer:
         else:
             sampler = SequentialSampler(data_source=self.train_dataset)
 
+        print("[DataLoader] 开始创建训练DataLoader...")
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset,
                                                    batch_size=self.config.data.train_batch_size,
                                                    num_workers=8,
                                                    drop_last=True,
                                                    collate_fn=collate_fn,
                                                    sampler=sampler)
+        print("[DataLoader] 训练DataLoader创建完成")
         if self.config.recurrent.enable:
+            print("[DataLoader] 开始创建验证数据集...")
             self.val_dataset = self.recurrent_register.dataset_cls(
                 recurrent_config=self.recurrent_config,
                 data_config=self.config.data,
@@ -531,6 +536,7 @@ class RayPPOTrainer:
                 tokenizer=self.tokenizer,
                 processor=self.processor,
             )
+            print(f"[DataLoader] 验证数据集创建完成，样本数: {len(self.val_dataset)}")
         else:
             dataset_cls: type[RLHFDataset] # important for static type checking
             self.val_dataset = dataset_cls(
@@ -555,6 +561,7 @@ class RayPPOTrainer:
             sampler=sampler,
         )
 
+        print("[DataLoader] 开始创建验证DataLoader...")
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
@@ -563,6 +570,7 @@ class RayPPOTrainer:
             drop_last=False,
             collate_fn=collate_fn,
         )
+        print("[DataLoader] 验证DataLoader创建完成")
 
         assert len(self.train_dataloader) >= 1
         assert len(self.val_dataloader) >= 1
@@ -632,6 +640,7 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
+        print("[Validate] 开始验证...")
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -640,7 +649,10 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
 
+        val_batch_count = 0
         for test_data in self.val_dataloader:
+            val_batch_count += 1
+            print(f"[Validate] 处理验证batch {val_batch_count}/{len(self.val_dataloader)}...")
             test_batch = DataProto.from_single_dict(test_data)
 
             # repeat test batch
@@ -982,6 +994,8 @@ class RayPPOTrainer:
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+            print("[Train] 开始初始验证（val_before_train=True）...")
+            print(f"[Train] 验证集大小: {len(self.val_dataloader)} batches, 总样本数: {len(self.val_dataset)}")
             val_metrics = self._validate()
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)

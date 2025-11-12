@@ -21,9 +21,14 @@ from codetiming import Timer
 from verl import DataProto
 
 from .interface import RAgent, RConfig
-from .utils import (chat_template, create_attention_mask, create_position_ids,
-                    graceful_padding, indexing_proto,
-                    pad_tensor_list_to_length)
+from .utils import (
+    chat_template,
+    create_position_ids,
+    enforce_left_padding,
+    graceful_padding,
+    indexing_proto,
+    pad_tensor_list_to_length,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel('INFO')
@@ -53,6 +58,8 @@ class LLMGenerationManager:
         self.world_size = actor_rollout_wg.world_size
         self.agent = agent_cls(tokenizer, config)
         self.chat_template = chat_template(tokenizer)
+        # FlashAttention 下的 Qwen2 需要左填充，加载时强制一致
+        self.tokenizer.padding_side = "left"
         self.PADDING_WORD_TOKENS = tokenizer.encode(self.chat_template.format(message="Hello."), add_special_tokens=False)
 
 
@@ -135,14 +142,26 @@ class LLMGenerationManager:
                 meta_info_gen.update(meta_info)
                 # [len(x) for x in messages] == [len(x[x!=pad_token_id]) for x in input_ids]
                 # torch.all(attention_masks.sum(-1) == torch.tensor([len(x[x!=pad_token_id]) for x in input_ids]))
-                input_ids = pad_tensor_list_to_length(messages, 
-                                                pad_token_id=pad_token_id,
-                                                max_length=meta_info_gen['input_pad_to'], 
-                                                left_pad=True)
-                attention_masks = create_attention_mask(input_ids, pad_token_id=pad_token_id)
+                input_ids, attention_mask_bool = pad_tensor_list_to_length(
+                    messages,
+                    pad_token_id=pad_token_id,
+                    max_length=meta_info_gen["input_pad_to"],
+                    left_pad=True,
+                    return_mask=True,
+                )
+                attention_masks = attention_mask_bool.to(torch.long)
+                input_ids, attention_masks, fixed = enforce_left_padding(
+                    input_ids, attention_masks, pad_token_id
+                )
                 position_ids = create_position_ids(attention_masks)
                 active_num_list.append(len(messages))
                 logger.info(f'padding done')
+            if meta_info_gen.get("stage") == "prefill" and getattr(self.agent, "pending_tensors", None):
+                input_ids, attention_masks, fixed = enforce_left_padding(
+                    input_ids, attention_masks, pad_token_id
+                )
+                if fixed:
+                    position_ids = create_position_ids(attention_masks)
             with _timer('mt_gen', timing_raw):
                 gen_output = self.generate_with_graceful_padding(input_ids, attention_masks, position_ids, meta_info_gen)
                 logger.info('generation done')

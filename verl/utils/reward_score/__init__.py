@@ -18,8 +18,15 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
     if data_source == "openai/gsm8k":
         from . import gsm8k
         res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ['lighteval/MATH', 'DigitalLearningGmbH/MATH-lighteval', 'AIME', 'AMC', 'MINERVA', "MATH", 'math_dapo'] or \
-            'MATH' in data_source:
+    elif data_source in [
+            'lighteval/MATH',
+            'DigitalLearningGmbH/MATH-lighteval',
+            'AIME',
+            'AMC',
+            'MINERVA',
+            "MATH",
+            'math_dapo',
+    ] or 'MATH' in data_source:
         from . import math
         res = math.compute_score(solution_str, ground_truth)
         # [Optional] Math-Verify Integration
@@ -52,7 +59,7 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
         from . import geo3k
 
         res = geo3k.compute_score(solution_str, ground_truth)
-    elif data_source in ['hotpotqa']:
+    elif data_source in ['hotpotqa'] or (isinstance(data_source, str) and data_source.startswith('hotpotqa')):
         from . import hotpotqa
         res = hotpotqa.compute_score(solution_str, ground_truth)
     else:

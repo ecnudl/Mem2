@@ -17,6 +17,7 @@ Contain small torch utilities
 
 
 import math
+import warnings
 from contextlib import contextmanager
 from typing import Dict, Union, List, Optional, Tuple
 
@@ -36,6 +37,44 @@ except ImportError:
     FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
 
+_INVALID_INDEX_WARNING_EMITTED = False
+
+
+def _sanitize_labels_for_gather(labels: torch.Tensor, vocab_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Clamp labels into the valid range for gather to avoid device-side assert when stray ids show up.
+    Returns the potentially adjusted labels and a boolean mask marking the entries that were invalid.
+    """
+    if labels.numel() == 0 or vocab_size <= 0:
+        return labels, torch.zeros_like(labels, dtype=torch.bool)
+
+    invalid_high = labels >= vocab_size
+    invalid_low = labels < 0
+    invalid_mask = invalid_high | invalid_low
+    if not torch.any(invalid_mask):
+        return labels, invalid_mask
+
+    safe_labels = labels.clone()
+    replacement_high = vocab_size - 1
+    replacement_low = 0
+    if torch.any(invalid_high):
+        safe_labels[invalid_high] = replacement_high
+    if torch.any(invalid_low):
+        safe_labels[invalid_low] = replacement_low
+
+    global _INVALID_INDEX_WARNING_EMITTED
+    if not _INVALID_INDEX_WARNING_EMITTED:
+        warnings.warn(
+            "Detected token ids outside the model vocabulary while computing log probabilities. "
+            "Those positions will be masked to zero; please verify tokenizer/model vocab alignment.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        _INVALID_INDEX_WARNING_EMITTED = True
+
+    return safe_labels, invalid_mask
+
+
 def gather_from_labels(data, label):
     """Gather the label from data. The value in label should be [0, vocab_size)
 
@@ -47,7 +86,10 @@ def gather_from_labels(data, label):
 
     """
 
-    output = torch.gather(data, -1, label.unsqueeze(-1)).squeeze(-1)
+    safe_labels, invalid_mask = _sanitize_labels_for_gather(label, data.size(-1))
+    output = torch.gather(data, -1, safe_labels.unsqueeze(-1)).squeeze(-1)
+    if torch.any(invalid_mask):
+        output = output.masked_fill(invalid_mask, 0.0)
     return output
 
 
@@ -55,15 +97,19 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     """
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
     """
+    vocab_size = logits.shape[-1]
+    safe_labels, invalid_mask = _sanitize_labels_for_gather(labels, vocab_size)
     if FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE:
         batch_dim = logits.shape[:-1]
         last_dim = logits.shape[-1]
         logits = logits.reshape(-1, last_dim)
-        labels = labels.reshape(-1)
-        output = logprobs_from_logits_flash_attn(logits, labels, inplace_backward=inplace_backward)
+        reshaped_labels = safe_labels.reshape(-1)
+        output = logprobs_from_logits_flash_attn(logits, reshaped_labels, inplace_backward=inplace_backward)
         output = output.view(*batch_dim)
     else:
-        output = logprobs_from_logits_v2(logits, labels)
+        output = logprobs_from_logits_v2(logits, safe_labels)
+    if torch.any(invalid_mask):
+        output = output.masked_fill(invalid_mask, 0.0)
     return output
 
 
@@ -83,19 +129,23 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels):
     """
     A memory efficient implementation of logprobs_from_logits
     """
+    vocab_size = logits.shape[-1]
+    safe_labels, invalid_mask = _sanitize_labels_for_gather(labels, vocab_size)
     if logits.dtype in [torch.float32, torch.float64]:
-        logits_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+        logits_labels = torch.gather(logits, dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
         # loop to reduce peak mem consumption
         logsumexp_values = torch.stack([torch.logsumexp(logit, dim=-1) for logit in logits])
         logprobs_labels = logits_labels - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     else:
         # logsumexp approach is unstable with bfloat16, fall back to slightly less efficent approach
         logprobs_labels = []
-        for row_logits, row_labels in zip(logits, labels):  # loop to reduce peak mem consumption
+        for row_logits, row_labels in zip(logits, safe_labels):  # loop to reduce peak mem consumption
             row_logprobs = F.log_softmax(row_logits, dim=-1)
             row_logprobs_labels = row_logprobs.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
+    if torch.any(invalid_mask):
+        logprobs_labels = logprobs_labels.masked_fill(invalid_mask, 0.0)
     return logprobs_labels
 
 

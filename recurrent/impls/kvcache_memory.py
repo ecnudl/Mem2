@@ -12,7 +12,6 @@ from recurrent.kvcache_utils import concat_past_kv, kv_seq_len, truncate_past_kv
 from recurrent.utils import (
     TokenTemplate,
     chat_template,
-    create_attention_mask,
     create_position_ids,
     pad_tensor_list_to_length,
 )
@@ -73,6 +72,11 @@ class KVCacheMemoryAgent(RAgent):
         self.gen_batch = gen_batch
         self.timing_raw = timing_raw
         self.ctx_length = gen_batch.batch["context_length"]
+        self.allowed_ctx_length = self.ctx_length
+        if getattr(self.config, "max_chunks", 0) > 0:
+            limit = self.config.max_chunks * self.config.chunk_size
+            limit_tensor = torch.full_like(self.ctx_length, limit)
+            self.allowed_ctx_length = torch.minimum(self.ctx_length, limit_tensor)
         self.context_ids = gen_batch.batch["context_ids"]
         self.prompt_ids = gen_batch.non_tensor_batch["prompt_ids"]
 
@@ -87,7 +91,7 @@ class KVCacheMemoryAgent(RAgent):
         self.pending_tensors = None
 
     def _context_active_mask(self) -> torch.Tensor:
-        return self.ctx_offset < self.ctx_length
+        return self.ctx_offset < self.allowed_ctx_length
 
     def _prepare_prefill_sequences(self) -> Tuple[List[torch.Tensor], dict]:
         active_mask = self._context_active_mask()
@@ -102,7 +106,7 @@ class KVCacheMemoryAgent(RAgent):
 
         for idx in active_indices.tolist():
             consumed = self.ctx_offset[idx].item()
-            total = self.ctx_length[idx].item()
+            total = self.allowed_ctx_length[idx].item()
             next_end = min(consumed + self.config.chunk_size, total)
             chunk = self.context_ids[idx, consumed:next_end].to(torch.long)
 
@@ -117,12 +121,13 @@ class KVCacheMemoryAgent(RAgent):
             sequences.append(sequence)
             self.ctx_offset[idx] = next_end
 
-        input_ids = pad_tensor_list_to_length(
+        input_ids, attention_mask = pad_tensor_list_to_length(
             sequences,
             pad_token_id=self.pad_token_id,
             left_pad=True,
+            return_mask=True,
         )
-        attention_mask = create_attention_mask(input_ids, pad_token_id=self.pad_token_id)
+        attention_mask = attention_mask.to(torch.long)
         position_ids = create_position_ids(attention_mask)
 
         self.pending_tensors = {

@@ -267,8 +267,16 @@ class ActorRolloutRefWorker(Worker):
 
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
-        # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-        cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
+        # For actor, use CPUOffload only if explicitly configured (param_offload=True)
+        # Note: CPUOffload for actor can cause issues with grad accumulation and generation
+        if role == "actor":
+            # Check if param_offload is explicitly enabled in config
+            if self._is_offload_param:
+                cpu_offload = CPUOffload(offload_params=True)
+            else:
+                cpu_offload = None
+        else:
+            cpu_offload = CPUOffload(offload_params=True)
         actor_module_fsdp = FSDP(
             actor_module,
             cpu_offload=cpu_offload,

@@ -1,6 +1,6 @@
 from .aio import get_async_client
 from utils import extract_solution
-from .envs import URL, API_KEY, RECURRENT_CHUNK_SIZE, RECURRENT_MAX_NEW, RECURRENT_MAX_CONTEXT_LEN
+from . import envs
 
 TEMPLATE = """You are presented with a problem, a section of an article that may contain the answer to the problem, and a previous memory. Please read the provided section carefully and update the memory with the new information that helps to answer the problem. Be sure to retain all relevant details from the previous memory while adding any new, useful information.
 
@@ -50,26 +50,26 @@ async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, s
     prompt = item['input'].strip()
     session = await get_async_client()
     async with session:
-        max_len = RECURRENT_MAX_CONTEXT_LEN
+        max_len = envs.RECURRENT_MAX_CONTEXT_LEN
         input_ids = tokenizer.encode(context)
         if len(input_ids) > max_len:
             input_ids = input_ids[:max_len//2] + input_ids[-max_len//2:]
         memory = NO_MEMORY
-        for i in range(0, len(input_ids), RECURRENT_CHUNK_SIZE):
-            chunk = input_ids[i:i+RECURRENT_CHUNK_SIZE]
+        for i in range(0, len(input_ids), envs.RECURRENT_CHUNK_SIZE):
+            chunk = input_ids[i:i+envs.RECURRENT_CHUNK_SIZE]
             msg = TEMPLATE.format(prompt=prompt, chunk=tokenizer.decode(chunk), memory=memory)
             if idx == 0:
                 print("user:")
                 print(clip_long_string(msg))
             try:
                 async with session.post(
-                    url=URL + "/chat/completions",
-                    headers={"Authorization": f"Bearer {API_KEY}"},
+                    url=envs.URL + "/chat/completions",
+                    headers={"Authorization": f"Bearer {envs.API_KEY}"},
                     json=dict(model=model,
                         messages=[{"role": "user", "content": msg}],
                         temperature=temperature,
                         top_p=top_p,
-                        max_tokens=RECURRENT_MAX_NEW
+                        max_tokens=envs.RECURRENT_MAX_NEW
                     )
                 ) as resp:
                     status = resp.status
@@ -93,13 +93,13 @@ async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, s
             print(clip_long_string(msg))
         try:
             async with session.post(
-                url=URL + "/chat/completions",
-                headers={"Authorization": f"Bearer {API_KEY}"},
+                url=envs.URL + "/chat/completions",
+                headers={"Authorization": f"Bearer {envs.API_KEY}"},
                 json=dict(model=model,
                     messages=[{"role": "user", "content": msg}],
                     temperature=temperature,
                     top_p=top_p,
-                    max_tokens=RECURRENT_MAX_NEW
+                    max_tokens=envs.RECURRENT_MAX_NEW
                 )
             ) as resp:
                 status = resp.status
@@ -117,4 +117,3 @@ async def async_query_llm(item, model, tokenizer, temperature=0.7, top_p=0.95, s
             import traceback
             traceback.print_exc()
         return ''
-
