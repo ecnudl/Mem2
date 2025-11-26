@@ -102,10 +102,18 @@ class TokenTemplate:
         
         # Reconstruct template by interleaving sections and keyword tokens
         for i, k in enumerate(self.keywords):
-            if isinstance(kwargs[k], list):
-                kwargs[k] = torch.tensor(kwargs[k], dtype=torch.long)
-            elif isinstance(kwargs[k], np.ndarray):
-                kwargs[k] = torch.from_numpy(kwargs[k]).to(torch.long)
+            value = kwargs[k]
+            if isinstance(value, torch.Tensor):
+                kwargs[k] = value.to(torch.long)
+            elif isinstance(value, list):
+                kwargs[k] = torch.tensor(value, dtype=torch.long)
+            elif isinstance(value, np.ndarray):
+                if value.dtype == np.object_:
+                    kwargs[k] = torch.tensor(list(value), dtype=torch.long)
+                else:
+                    kwargs[k] = torch.from_numpy(value).to(torch.long)
+            else:
+                kwargs[k] = torch.tensor(list(value), dtype=torch.long)
             formatted_parts.append(self.token_sections[i])
             formatted_parts.append(kwargs[k])
         formatted_parts.append(self.last_section)

@@ -172,7 +172,6 @@ class NaiveRollout(BaseRollout):
 
         batch = TensorDict(
             {
-                "input_ids": prompts_out,
                 "prompts": prompts_out,
                 "responses": response,
                 "sequences": idx,
@@ -182,6 +181,12 @@ class NaiveRollout(BaseRollout):
             },
             batch_size=batch_size,
         )
+
+        if not (idx.size(1) == attention_mask.size(1) == position_ids.size(1)):
+            raise ValueError(
+                "Sequence length mismatch among input_ids, attention_mask, and position_ids."
+            )
+        batch["input_ids"] = idx
 
         self.module.train()
 

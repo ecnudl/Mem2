@@ -14,11 +14,29 @@ PROJ_DIR=${PROJ_ROOT}/${EXP}
 
 MAXLEN=3072
 MAX_NEW_TOKEN=384
-MAX_TOKEN_LEN_PER_GPU=4608
+MAX_TOKEN_LEN_PER_GPU=5120
 
-export CUDA_VISIBLE_DEVICES=0
+SELECTED_GPU=2
+echo "固定使用GPU ${SELECTED_GPU} 进行训练"
+
+# 激活conda环境（关键！确保Ray workers使用正确的Python环境）
+source ~/anaconda3/etc/profile.d/conda.sh
+conda activate memagent
+
+export CUDA_VISIBLE_DEVICES=${SELECTED_GPU}
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
+
+# 使用独立的临时目录，避免与其他Ray实例冲突
+export RAY_TMPDIR="/tmp/ray_kv_training_$$"
+mkdir -p "$RAY_TMPDIR"
+
+# 确保不连接到现有集群（不执行ray stop，避免影响其他GPU进程）
+unset RAY_ADDRESS 2>/dev/null || true
+export RAY_ADDRESS=""
+
+# 添加Ray配置，强制启动新集群
+export RAY_IGNORE_VERSION_MISMATCH=1
 
 python3 -m verl.trainer.main_ppo_kv \
     recurrent.enable=memory \
@@ -29,7 +47,10 @@ python3 -m verl.trainer.main_ppo_kv \
     recurrent.memory.config.max_memorization_length=${MAX_NEW_TOKEN} \
     recurrent.memory.config.max_final_response_length=${MAX_NEW_TOKEN} \
     recurrent.memory.config.max_chunks=1 \
-    +recurrent.memory.config.prompt_as_first_chunk=False \
+    +recurrent.memory.config.kv_cache_max_length=4096 \
+    +recurrent.memory.config.kv_cache_dtype=bfloat16 \
+    +recurrent.memory.config.reuse_prefill=True \
+    +recurrent.memory.config.prompt_as_first_chunk=True \
     algorithm.adv_estimator=grpo \
     algorithm.grpo_use_adv=False \
     trainer.save_freq=999 \
@@ -55,6 +76,7 @@ python3 -m verl.trainer.main_ppo_kv \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=2 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
@@ -74,10 +96,12 @@ python3 -m verl.trainer.main_ppo_kv \
     actor_rollout_ref.rollout.do_sample=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
     critic.forward_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \

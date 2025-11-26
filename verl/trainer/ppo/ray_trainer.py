@@ -1175,6 +1175,9 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
+                        # rollout (KV) 已经带了 old_log_probs，这里需要先清理以便使用重算值覆盖
+                        if "old_log_probs" in batch.batch:
+                            batch.batch.pop("old_log_probs")
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
@@ -1257,7 +1260,8 @@ class RayPPOTrainer:
                             # turns of a sample will have the same final reward, now we mapping turns to samples
                             batch.batch['token_level_scores'] = reward_tensor[sample_index]
 
-                            if not self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
+                            # Recurrent 版本尚未支持 KL 惩罚，若配置开启则直接报错
+                            if self.config.actor_rollout_ref.actor.get('use_kl_loss', False):
                                 raise NotImplementedError("KL penalty is not implemented for recurrent.")
                             
                             batch.batch['token_level_rewards'] = batch.batch['token_level_scores']

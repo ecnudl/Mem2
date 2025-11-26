@@ -16,6 +16,7 @@ KVcache 记忆版本的 PPO 入口，基本沿用 main_ppo 逻辑，仅替换了
 """
 
 import os
+import sys
 
 import hydra
 import ray
@@ -71,10 +72,34 @@ def main(config):
 def run_ppo(config) -> None:
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not ray.is_initialized():
+        # 使用独立的临时目录避免版本冲突，不影响其他GPU进程
+        temp_dir = os.environ.get("RAY_TMPDIR", f"/tmp/ray_kv_training_{os.getpid()}")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # 获取当前环境的Python路径
+        conda_env = os.environ.get("CONDA_PREFIX", "")
+        python_path = os.path.join(conda_env, "bin/python") if conda_env else sys.executable
+
+        print(f"[Ray Init] 使用独立Ray集群，临时目录: {temp_dir}")
+        print(f"[Ray Init] Python环境: {python_path}")
+
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}},
+            _temp_dir=temp_dir,  # 使用独立临时目录
+            ignore_reinit_error=True,  # 忽略重新初始化错误
+            include_dashboard=False,  # 关闭dashboard避免端口冲突
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "WARN",
+                    "VLLM_LOGGING_LEVEL": "WARN",
+                    "PATH": os.environ.get("PATH", ""),
+                    "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                    "LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", ""),
+                }
+            },
             num_cpus=config.ray_init.num_cpus,
         )
+        print(f"[Ray Init] 成功启动 Ray {ray.__version__}")
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))

@@ -3,7 +3,12 @@ set -x
 
 # 使用1k数据训练的脚本
 # 强制启动新的本地Ray实例，避免连接到现有集群
+# 确保不连接到任何现有Ray集群
 export RAY_ADDRESS=""
+unset RAY_ADDRESS 2>/dev/null || true
+
+# 使用GPU 1卡进行训练
+export CUDA_VISIBLE_DEVICES=1
 
 NNODES=1
 NGPUS_PER_NODE=1
@@ -31,8 +36,15 @@ if [ ! -f "$TRAIN_PATH" ]; then
 fi
 
 # 断开当前进程的Ray连接（如果存在），避免版本不匹配问题
-# 这不会影响其他进程的Ray连接
+# 注意：ray.shutdown() 只会关闭当前Python进程的Ray客户端连接，
+# 不会终止Ray集群或其他进程的训练任务，完全安全
 python3 -c "import ray; ray.shutdown()" 2>/dev/null || true
+
+# 确保环境变量在Python进程启动前就被清除，强制启动新的本地Ray实例
+# 这样不会连接到任何现有的Ray集群，也不会影响其他进程
+export RAY_ADDRESS=""
+# 禁用Ray的自动发现机制，强制使用本地实例
+export RAY_DISABLE_IMPORT_WARNING=1
 
 python3 -m verl.trainer.main_ppo \
     recurrent.enable=memory \

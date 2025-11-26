@@ -90,8 +90,8 @@ class NaiveKVRollout(BaseRollout):
         for batch_idx in range(batch_size):
             per_sample: List[Tuple[torch.Tensor, torch.Tensor]] = []
             for key, value in past_key_values:
-                key_slice = key[batch_idx : batch_idx + 1].contiguous()
-                value_slice = value[batch_idx : batch_idx + 1].contiguous()
+                key_slice = key[batch_idx:batch_idx + 1].contiguous()
+                value_slice = value[batch_idx:batch_idx + 1].contiguous()
                 target_dtype = dtype or key_slice.dtype
                 key_slice = key_slice.to(device=cpu_device, dtype=target_dtype)
                 value_slice = value_slice.to(device=cpu_device, dtype=target_dtype)
@@ -185,14 +185,14 @@ class NaiveKVRollout(BaseRollout):
 
     def _decode(self, prompts: DataProto) -> DataProto:
         idx = prompts.batch["input_ids"]
-        attention_mask = prompts.batch["attention_mask"]
+        prompt_attention_mask = prompts.batch["attention_mask"]
         position_ids = prompts.batch["position_ids"]
         pad_token_id = prompts.meta_info.get("pad_token_id")
         if pad_token_id is None:
             raise ValueError("pad_token_id must be provided in prompts.meta_info for KV rollout.")
-        idx, attention_mask, fixed = enforce_left_padding(idx, attention_mask, pad_token_id)
+        idx, prompt_attention_mask, fixed = enforce_left_padding(idx, prompt_attention_mask, pad_token_id)
         if fixed:
-            position_ids = create_position_ids(attention_mask)
+            position_ids = create_position_ids(prompt_attention_mask)
 
         eos_token_id = prompts.meta_info["eos_token_id"]
         generation_kwargs = prompts.meta_info.get("generation_kwargs", {})
@@ -214,9 +214,24 @@ class NaiveKVRollout(BaseRollout):
 
         kv_seq_lens = prompts.meta_info.get("kv_seq_lens") if reuse_prefill else None
         if past_key_values is not None and kv_seq_lens:
-            attention_mask = self._prepend_attention(attention_mask, kv_seq_lens)
-            offsets = torch.tensor(kv_seq_lens, device=position_ids.device).unsqueeze(1)
-            position_ids = position_ids + offsets
+            if len(kv_seq_lens) != idx.size(0):
+                raise ValueError("kv_seq_lens size does not match batch size.")
+            kv_offset = torch.tensor(
+                kv_seq_lens, device=idx.device, dtype=position_ids.dtype
+            ).unsqueeze(1)
+            # runtime mask: prepend ones for cached tokens
+            runtime_attention_mask = self._prepend_attention(prompt_attention_mask, kv_seq_lens)
+            # training mask (for DataProto) should exclude cached prefix
+            attention_mask = prompt_attention_mask
+            # position ids for current prompt tokens need to start after KV prefix
+            position_ids = create_position_ids(prompt_attention_mask) + kv_offset
+        else:
+            # If not using KV cache, ensure position_ids matches input_ids length
+            if position_ids.size(1) != idx.size(1):
+                position_ids = position_ids[:, -idx.size(1):]
+            runtime_attention_mask = prompt_attention_mask
+            attention_mask = prompt_attention_mask
+
         top_k = generation_kwargs.get("top_k", self.config.top_k)
         if top_k is not None and top_k <= 0:
             top_k = None
@@ -233,35 +248,64 @@ class NaiveKVRollout(BaseRollout):
         )
 
         logits_lst = []
-        for step in range(response_length):
-            if past_key_values is not None and step > 0:
-                idx_cond = idx[:, -1:]
-            else:
-                idx_cond = idx
-            position_cond = position_ids[:, -idx_cond.size(1):]
+        # Encode the whole prompt once (with KV cache prefix if available)
+        output = self.module(
+            input_ids=idx,
+            attention_mask=runtime_attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        past_key_values = output.past_key_values
+        logits = output.logits[:, -1, :] / temperature
 
+        if top_k is not None:
+            k = min(top_k, logits.size(-1))
+            v, _ = torch.topk(logits, k)
+            logits[logits < v[:, [-1]]] = -float("Inf")
+
+        logits_lst.append(logits)
+        probs = F.softmax(logits, dim=-1)
+        if do_sample:
+            idx_next = torch.multinomial(probs, num_samples=1)
+        else:
+            idx_next = torch.argmax(probs, dim=-1, keepdim=True)
+
+        runtime_attention_mask = torch.cat((runtime_attention_mask, prev_attention_mask), dim=-1)
+        attention_mask = torch.cat((attention_mask, prev_attention_mask), dim=-1)
+
+        for token_id in eos_token_id:
+            prev_attention_mask = torch.logical_and(idx_next != token_id, prev_attention_mask.bool())
+        prev_attention_mask = prev_attention_mask.to(attention_mask.dtype)
+
+        position_ids = torch.cat((position_ids, position_ids[:, -1:] + 1), dim=-1)
+
+        idx = torch.cat((idx, idx_next), dim=1)
+
+        for _ in range(1, response_length):
             output = self.module(
-                input_ids=idx_cond,
-                attention_mask=attention_mask,
-                position_ids=position_cond,
+                input_ids=idx_next,
+                attention_mask=runtime_attention_mask,
+                position_ids=position_ids[:, -1:],
                 past_key_values=past_key_values,
                 use_cache=True,
             )
             past_key_values = output.past_key_values
-            logits = output.logits
-            logits = logits[:, -1, :] / temperature
+            logits = output.logits[:, -1, :] / temperature
 
             if top_k is not None:
                 k = min(top_k, logits.size(-1))
                 v, _ = torch.topk(logits, k)
                 logits[logits < v[:, [-1]]] = -float("Inf")
 
+            logits_lst.append(logits)
             probs = F.softmax(logits, dim=-1)
             if do_sample:
                 idx_next = torch.multinomial(probs, num_samples=1)
             else:
                 idx_next = torch.argmax(probs, dim=-1, keepdim=True)
 
+            runtime_attention_mask = torch.cat((runtime_attention_mask, prev_attention_mask), dim=-1)
             attention_mask = torch.cat((attention_mask, prev_attention_mask), dim=-1)
 
             for token_id in eos_token_id:
@@ -271,7 +315,6 @@ class NaiveKVRollout(BaseRollout):
             position_ids = torch.cat((position_ids, position_ids[:, -1:] + 1), dim=-1)
 
             idx = torch.cat((idx, idx_next), dim=1)
-            logits_lst.append(logits)
 
         logits = torch.stack(logits_lst, dim=1)
         prompts_out = idx[:, :prompt_length]
@@ -320,7 +363,6 @@ class NaiveKVRollout(BaseRollout):
 
         batch = TensorDict(
             {
-                "input_ids": prompts_out,
                 "prompts": prompts_out,
                 "responses": response,
                 "sequences": idx,
@@ -330,6 +372,12 @@ class NaiveKVRollout(BaseRollout):
             },
             batch_size=batch_size,
         )
+
+        if not (idx.size(1) == attention_mask.size(1) == position_ids.size(1)):
+            raise ValueError(
+                "Sequence length mismatch among input_ids, attention_mask, and position_ids."
+            )
+        batch["input_ids"] = idx
 
         self.module.train()
 

@@ -72,6 +72,16 @@ def run_ppo(config) -> None:  # PPO 训练主流程
     # isolation, will solve in the future
     # 以上 TODO 保留：用于解决与 SGLang 的设备隔离冲突
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")  # 保留当前 CUDA_VISIBLE_DEVICES 设置
+    # 强制关闭任何已存在的Ray连接，确保启动新的本地实例
+    if ray.is_initialized():
+        ray.shutdown()
+    # 强制清除RAY_ADDRESS环境变量，防止自动连接到现有集群
+    # 必须在ray.init()之前设置，否则Ray会自动发现现有集群
+    os.environ["RAY_ADDRESS"] = ""
+    # 使用独立的临时目录，避免Ray自动发现现有集群
+    import tempfile
+    temp_dir = tempfile.mkdtemp(prefix="ray_local_")
+    os.environ["RAY_TMPDIR"] = temp_dir
     if not ray.is_initialized():  # 若 Ray 尚未初始化则在本进程内启动
         # this is for local ray cluster
         # 本地模式下初始化 Ray 集群
@@ -81,10 +91,24 @@ def run_ppo(config) -> None:  # PPO 训练主流程
         if cuda_visible_devices:
             runtime_env_vars["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
             runtime_env_vars["PYTORCH_CUDA_ALLOC_CONF"] = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        ray.init(  # 设置 Ray 本地集群的运行时环境
-            runtime_env={"env_vars": runtime_env_vars},  # 控制关键环境变量
-            num_cpus=config.ray_init.num_cpus,  # 根据配置分配 CPU 资源
-        )
+        # 尝试启动新的本地Ray实例
+        try:
+            ray.init(  # 设置 Ray 本地集群的运行时环境
+                address="local",  # 明确指定本地模式，不自动发现
+                ignore_reinit_error=True,  # 忽略重新初始化错误
+                _node_ip_address="127.0.0.1",  # 强制使用本地回环地址
+                runtime_env={"env_vars": runtime_env_vars},  # 控制关键环境变量
+                num_cpus=config.ray_init.num_cpus,  # 根据配置分配 CPU 资源
+            )
+        except Exception as e:
+            # 如果失败，尝试使用address=None
+            ray.init(
+                address=None,
+                ignore_reinit_error=True,
+                _node_ip_address="127.0.0.1",
+                runtime_env={"env_vars": runtime_env_vars},
+                num_cpus=config.ray_init.num_cpus,
+            )
 
     runner = TaskRunner.remote()  # 创建远程任务执行器
     ray.get(runner.run.remote(config))  # 在 Ray actor 中执行训练任务并同步等待完成

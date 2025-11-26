@@ -58,7 +58,8 @@ class KVCacheMemoryAgent(RAgent):
         self.tokenizer = tokenizer
         self.chat_template = chat_template(tokenizer)
         final_template = (
-            "You are given a problem. Use the context you have just read to answer it.\n\n"
+            "You are given a problem. Use the context you have just read to answer it. "
+            "Put your answer in \\boxed{{}}.\n\n"
             "<problem>\n{prompt}\n</problem>\n\nAnswer:"
         )
         self.token_final_message_template = TokenTemplate(
@@ -89,6 +90,11 @@ class KVCacheMemoryAgent(RAgent):
         self.sample_index_list: List[torch.Tensor] = []
         self.final_output: Optional[DataProto] = None
         self.pending_tensors = None
+        self.prefill_step = 0
+
+        logger.info(f"[KV Agent Start] Batch size: {self.bsz}, "
+                    f"Context lengths: {self.ctx_length.tolist()}, "
+                    f"Chunk size: {self.config.chunk_size}")
 
     def _context_active_mask(self) -> torch.Tensor:
         return self.ctx_offset < self.allowed_ctx_length
@@ -97,6 +103,7 @@ class KVCacheMemoryAgent(RAgent):
         active_mask = self._context_active_mask()
         if active_mask.sum().item() == 0:
             # switch to decode stage
+            logger.info(f"[Prefill->Decode] All chunks processed, switching to decode phase")
             self.phase = "decode"
             return [], {}
 
@@ -122,8 +129,12 @@ class KVCacheMemoryAgent(RAgent):
                     )
                     prompt_tensor = torch.tensor(prompt_list, dtype=torch.long)
                 sequence = torch.cat([prompt_tensor, chunk], dim=0)
+                logger.info(f"[Prefill Step {self.prefill_step}] Sample {idx}: "
+                            f"First chunk with prompt (prompt={len(prompt_tensor)}, chunk={len(chunk)})")
             else:
                 sequence = chunk
+                logger.info(f"[Prefill Step {self.prefill_step}] Sample {idx}: "
+                            f"Chunk tokens: {len(chunk)} (offset={consumed})")
 
             sequences.append(sequence)
             self.ctx_offset[idx] = next_end
@@ -151,6 +162,10 @@ class KVCacheMemoryAgent(RAgent):
             "reuse_prefill": self.config.reuse_prefill,
         }
 
+        logger.info(f"[Prefill Step {self.prefill_step}] Prepared {len(sequences)} sequences, "
+                    f"max length: {input_ids.size(-1)}")
+        self.prefill_step += 1
+
         return sequences, meta_info
 
     def _prepare_decode_sequences(self) -> Tuple[List[torch.Tensor], dict]:
@@ -164,6 +179,9 @@ class KVCacheMemoryAgent(RAgent):
         self.sample_index_list.append(sample_index)
         self.final_mask_list.append(final_mask)
 
+        kv_lens = [kv_seq_len(item) if item else 0 for item in self.kv_cache]
+        logger.info(f"[Decode] Starting final generation with KV cache lengths: {kv_lens}")
+
         meta_info = {
             "stage": "decode",
             "input_pad_to": max(len(msg) for msg in messages),
@@ -173,7 +191,7 @@ class KVCacheMemoryAgent(RAgent):
                 "n": 1,
             },
             "past_key_values": self.kv_cache,
-            "kv_seq_lens": [kv_seq_len(item) for item in self.kv_cache],
+            "kv_seq_lens": kv_lens,
             "reuse_prefill": self.config.reuse_prefill,
         }
         self.pending_tensors = None
@@ -214,6 +232,8 @@ class KVCacheMemoryAgent(RAgent):
             max_cache_len = self.config.kv_cache_max_length
             for local_idx, sample_idx in enumerate(self.last_active_index.tolist()):
                 cache_fragment = past_key_values[local_idx]
+                old_len = kv_seq_len(self.kv_cache[sample_idx]) if self.kv_cache[sample_idx] else 0
+
                 if self.kv_cache[sample_idx] is None:
                     cache = cache_fragment
                 else:
@@ -221,12 +241,17 @@ class KVCacheMemoryAgent(RAgent):
                         self.kv_cache[sample_idx], cache_fragment
                     )
                 cache = truncate_past_kv(cache, max_cache_len)
+                new_len = kv_seq_len(cache)
                 self.kv_cache[sample_idx] = cache
+
+                logger.info(f"[Prefill Update] Sample {sample_idx}: "
+                            f"KV cache {old_len} → {new_len} tokens")
 
             self.current_stage = None
             return gen_output
 
         if getattr(self, "current_stage", None) == "decode":
+            logger.info(f"[Decode Update] Final answer generated")
             self.final_output = gen_output
             self.phase = "done"
             self.current_stage = None
@@ -249,6 +274,11 @@ class KVCacheMemoryAgent(RAgent):
     def end(self):
         sample_index = torch.cat(self.sample_index_list) if self.sample_index_list else torch.arange(self.bsz, dtype=torch.long)
         final_mask = torch.cat(self.final_mask_list) if self.final_mask_list else torch.ones(self.bsz, dtype=torch.bool)
+
+        kv_lens = [kv_seq_len(item) if item else 0 for item in self.kv_cache]
+        logger.info(f"[Agent End] Total prefill steps: {self.prefill_step}, "
+                    f"Final KV cache lengths: {kv_lens}")
+
         return final_mask, sample_index
 
 

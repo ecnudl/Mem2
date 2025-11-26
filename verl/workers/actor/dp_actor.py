@@ -40,6 +40,65 @@ __all__ = ["DataParallelPPOActor"]
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+_INVALID_TOKEN_WARNING_EMITTED = False
+_RMPAD_FALLBACK_WARNING_EMITTED = False
+
+
+def _sanitize_input_ids_for_model(
+    input_ids: torch.Tensor, vocab_size: int, pad_token_id: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Clamp token ids into the valid vocabulary range to avoid device-side asserts when
+    stray ids appear (e.g., tokenizer/model mismatch). Returns the adjusted ids and a
+    boolean mask indicating the clamped positions.
+    """
+    if input_ids.numel() == 0 or vocab_size <= 0:
+        return input_ids, torch.zeros_like(input_ids, dtype=torch.bool)
+
+    invalid_high = input_ids >= vocab_size
+    invalid_low = input_ids < 0
+    invalid_mask = invalid_high | invalid_low
+    if not torch.any(invalid_mask):
+        return input_ids, invalid_mask
+
+    safe_ids = input_ids.clone()
+    replacement = pad_token_id if pad_token_id is not None else 0
+    if replacement < 0 or replacement >= vocab_size:
+        replacement = 0
+    safe_ids = safe_ids.clamp(min=0, max=vocab_size - 1)
+    safe_ids[invalid_mask] = replacement
+
+    global _INVALID_TOKEN_WARNING_EMITTED
+    if not _INVALID_TOKEN_WARNING_EMITTED:
+        logger.warning(
+            "Detected token ids outside the model vocabulary while preparing inputs; "
+            "they have been clamped to avoid CUDA gather asserts. Please check the "
+            "tokenizer/model configuration."
+        )
+        _INVALID_TOKEN_WARNING_EMITTED = True
+    return safe_ids, invalid_mask
+
+
+def _validate_rmpad_inputs(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> bool:
+    """
+    Validate that remove-padding can be safely applied.
+    If any shape/indices issue is detected, return False to force a safe padded path.
+    """
+    if input_ids.shape != attention_mask.shape:
+        return False
+    if input_ids.numel() == 0:
+        return False
+    flat_mask = attention_mask.flatten()
+    if flat_mask.numel() != input_ids.numel():
+        return False
+    flat_mask = (flat_mask != 0)
+    if not flat_mask.any():
+        return False
+    max_idx = torch.nonzero(flat_mask, as_tuple=False).flatten().max()
+    if max_idx is None:
+        return False
+    return max_idx.item() < input_ids.numel()
+
 
 class DataParallelPPOActor(BasePPOActor):
     def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
@@ -74,11 +133,39 @@ class DataParallelPPOActor(BasePPOActor):
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
+            # derive vocab size from config or embedding weight to robustly sanitize
+            vocab_size = getattr(self.actor_module.config, "vocab_size", None)
+            if vocab_size is None and hasattr(self.actor_module, "get_input_embeddings"):
+                emb = self.actor_module.get_input_embeddings()
+                if emb is not None and hasattr(emb, "weight"):
+                    vocab_size = emb.weight.size(0)
+            pad_token_id = getattr(self.actor_module.config, "pad_token_id", None)
+            # fall back to padded path if any invalid ids are seen to avoid downstream CUDA asserts
+            use_rmpad = self.use_remove_padding
+            if vocab_size is not None:
+                input_ids, invalid_input_mask = _sanitize_input_ids_for_model(
+                    input_ids, vocab_size=vocab_size, pad_token_id=pad_token_id
+                )
+                if torch.any(invalid_input_mask):
+                    attention_mask = attention_mask.masked_fill(invalid_input_mask, 0)
+                    if position_ids.dim() == 2:
+                        position_ids = position_ids.masked_fill(invalid_input_mask, 0)
+                    elif position_ids.dim() == 3:
+                        position_ids = position_ids.masked_fill(invalid_input_mask.unsqueeze(1), 0)
+                    use_rmpad = False
+            # enforce binary mask and re-validate remove-padding safety
+            attention_mask = (attention_mask != 0)
+            if use_rmpad and not _validate_rmpad_inputs(input_ids, attention_mask):
+                use_rmpad = False
+                global _RMPAD_FALLBACK_WARNING_EMITTED
+                if not _RMPAD_FALLBACK_WARNING_EMITTED:
+                    logger.warning("Disable remove-padding for this micro-batch due to mask/index mismatch; falling back to padded forward to avoid CUDA gather asserts.")
+                    _RMPAD_FALLBACK_WARNING_EMITTED = True
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
 
-            if self.use_remove_padding:
+            if use_rmpad:
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
@@ -97,6 +184,10 @@ class DataParallelPPOActor(BasePPOActor):
                     input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, self.ulysses_sequence_parallel_size)
 
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
+                if vocab_size is not None:
+                    input_ids_rmpad_rolled, _ = _sanitize_input_ids_for_model(
+                        input_ids_rmpad_rolled, vocab_size=vocab_size, pad_token_id=pad_token_id
+                    )
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
                 output = self.actor_module(
@@ -110,11 +201,17 @@ class DataParallelPPOActor(BasePPOActor):
 
                 logits_rmpad.div_(temperature)
 
+                vocab_size = logits_rmpad.size(-1)
+                labels = input_ids_rmpad_rolled
+                invalid_mask = (labels >= vocab_size) | (labels < 0)
+                if invalid_mask.any():
+                    labels = labels.clamp(min=0, max=vocab_size - 1)
+
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                 inplace_backward = True
                 if calculate_entropy:
                     inplace_backward = False
-                log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled, inplace_backward=inplace_backward)
+                log_probs = logprobs_from_logits(logits=logits_rmpad, labels=labels, inplace_backward=inplace_backward)
 
                 # compute entropy
                 if calculate_entropy:
@@ -145,6 +242,10 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                 )  # prevent model thinks we are generating
                 logits = output.logits
+                if vocab_size is not None:
+                    responses = micro_batch["responses"]
+                    responses, _ = _sanitize_input_ids_for_model(responses, vocab_size=vocab_size, pad_token_id=pad_token_id)
+                    micro_batch = {**micro_batch, "responses": responses}
                 logits.div_(temperature)
                 logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
                 log_probs = logprobs_from_logits(logits, micro_batch["responses"])
