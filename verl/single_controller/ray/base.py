@@ -149,13 +149,17 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         self._options.update(options)
 
     def __call__(self, placement_group, placement_group_bundle_idx, use_gpu: bool = True, num_gpus=1, sharing_with=None) -> Any:
+        actor_cls, base_options = self._resolve_actor_cls_and_options()
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             cuda_visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
-            options = {"scheduling_strategy": NodeAffinitySchedulingStrategy(node_id=target_node_id, soft=False)}
-            return self.cls.options(**options).remote(*self.args, cuda_visible_devices=cuda_visible_devices, **self.kwargs)
+            options = base_options.copy()
+            options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(node_id=target_node_id, soft=False)
+            options.update(self._options)
+            return actor_cls.options(**options).remote(*self.args, cuda_visible_devices=cuda_visible_devices, **self.kwargs)
 
-        options = {"scheduling_strategy": PlacementGroupSchedulingStrategy(placement_group=placement_group, placement_group_bundle_index=placement_group_bundle_idx)}
+        options = base_options.copy()
+        options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(placement_group=placement_group, placement_group_bundle_index=placement_group_bundle_idx)
         options.update(self._options)
 
         if use_gpu:
@@ -168,7 +172,22 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         # print("cls:", self.cls)
         # print("args: ", self.args)
         # print("kwargs: ", self.kwargs)
-        return self.cls.options(**options).remote(*self.args, **self.kwargs)
+        return actor_cls.options(**options).remote(*self.args, **self.kwargs)
+
+    def _resolve_actor_cls_and_options(self):
+        """Unwrap Ray ActorClass and pre-set options from ActorOptionWrapper."""
+        actor_cls = self.cls
+        base_options = {}
+        if not hasattr(actor_cls, "options"):
+            remote_fn = getattr(actor_cls, "remote", None)
+            closure = getattr(remote_fn, "__closure__", None) or []
+            for cell in closure:
+                cell_val = getattr(cell, "cell_contents", None)
+                if hasattr(cell_val, "options"):
+                    actor_cls = cell_val
+                elif isinstance(cell_val, dict):
+                    base_options.update(cell_val)
+        return actor_cls, base_options
 
 
 class RayWorkerGroup(WorkerGroup):
@@ -198,7 +217,8 @@ class RayWorkerGroup(WorkerGroup):
             self._init_with_resource_pool(resource_pool=resource_pool, ray_cls_with_init=ray_cls_with_init, bin_pack=bin_pack, detached=detached)
 
         if ray_cls_with_init is not None:
-            self._bind_worker_method(self.ray_cls_with_init.cls, func_generator)
+            # bind methods on the real worker class (not the Ray wrapper) so register-ed APIs are visible
+            self._bind_worker_method(_unwrap_ray_remote(self.ray_cls_with_init.cls), func_generator)
 
     def _is_worker_alive(self, worker: ray.actor.ActorHandle):
         worker_state_dict = get_actor(worker._actor_id.hex())
@@ -437,6 +457,13 @@ def _bind_workers_method_to_parent(cls, key, user_defined_cls):
 
 
 def _unwrap_ray_remote(cls):
+    # Handle Ray ActorClass or ActorOptionWrapper
+    if hasattr(cls, "remote") and hasattr(getattr(cls, "remote"), "__closure__"):
+        for cell in getattr(cls.remote, "__closure__", []) or []:
+            cell_val = getattr(cell, "cell_contents", None)
+            if hasattr(cell_val, "__ray_actor_class__"):
+                cls = cell_val
+                break
     if hasattr(cls, "__ray_actor_class__"):
         cls = cls.__ray_actor_class__
     return cls
@@ -462,7 +489,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     """
     cls_dict = {}
     init_args_dict = {}
-    worker_cls = _determine_fsdp_megatron_base_class([cls.cls.__ray_actor_class__.__mro__ for cls in class_dict.values()])
+    worker_cls = _determine_fsdp_megatron_base_class([_unwrap_ray_remote(cls.cls).__mro__ for cls in class_dict.values()])
     assert issubclass(worker_cls, Worker), f"worker_cls {worker_cls} should be a subclass of Worker"
     print(f"colocated worker base class {worker_cls}")
 
@@ -490,6 +517,6 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
         user_defined_cls = _unwrap_ray_remote(user_defined_cls)
         _bind_workers_method_to_parent(WorkerDict, key, user_defined_cls)
 
-    remote_cls = ray.remote(WorkerDict)
+    remote_cls = ray.remote(WorkerDict).options(enable_task_events=False)
     remote_cls = RayClassWithInitArgs(cls=remote_cls)
     return remote_cls

@@ -8,29 +8,31 @@ export RAY_ADDRESS=""
 unset RAY_ADDRESS 2>/dev/null || true
 
 # 使用GPU 1卡进行训练
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
+# 降低碎片化导致的额外显存开销
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 NNODES=1
 NGPUS_PER_NODE=1
 PROJ_ROOT=/home/admin123/dl/MemAgent/outputs
 DATASET_ROOT=/home/admin123/dl/MemAgent/taskutils/memory_data
 
-MODEL_PATH=/mnt/ssd2/models/Qwen2.5-0.5B-Instruct
+MODEL_PATH=/mnt/ssd2/models/Qwen2.5-1.5B-Instruct
 VAL_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_dev_20.parquet"
 TRAIN_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_train_1k.parquet"
-EXP=memory_agent/7B_1k
+EXP=text_1k
 PROJ_DIR=${PROJ_ROOT}/${EXP}
 
 # Please note that recurrent framewrok will use max_length defined in task config.
 # These two values are just for vLLM to decide max_model_length.
-MAXLEN=4096
-MAX_NEW_TOKEN=512
+MAXLEN=1024
+MAX_NEW_TOKEN=128
 
 # 如果1k数据文件不存在，先创建它
 if [ ! -f "$TRAIN_PATH" ]; then
     echo "1k训练数据文件不存在，正在创建..."
     python3 /home/admin123/dl/MemAgent/scripts/create_train_1k.py \
-        --input "${DATASET_ROOT}/hotpotqa/hotpotqa_train_32k.parquet" \
+        --input "${DATASET_ROOT}/hotpotqa/hotpotqa_train_1k.parquet" \
         --output "$TRAIN_PATH" \
         --num_samples 1000
 fi
@@ -48,7 +50,9 @@ export RAY_DISABLE_IMPORT_WARNING=1
 
 python3 -m verl.trainer.main_ppo \
     recurrent.enable=memory \
-    recurrent.memory.config.chunk_size=5000 \
+    recurrent.memory.config.chunk_size=1024 \
+    recurrent.memory.config.max_memorization_length=${MAX_NEW_TOKEN} \
+    recurrent.memory.config.max_final_response_length=${MAX_NEW_TOKEN} \
     algorithm.adv_estimator=grpo \
     algorithm.grpo_use_adv=False \
     trainer.save_freq=100 \
@@ -62,7 +66,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$VAL_PATH \
     data.shuffle=False \
     data.filter_overlong_prompts=True \
-    data.train_batch_size=32 \
+    data.train_batch_size=2 \
     data.truncation='center' \
     +data.context_key='context' \
     data.max_prompt_length=$MAXLEN \
@@ -71,18 +75,20 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=$MODEL_PATH  \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=2 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384 \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=6144 \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=6144 \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=6144 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.001 \
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.kl_loss_coef=0.0 \
+    actor_rollout_ref.actor.kl_loss_type=none \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    +actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=1 \
@@ -94,17 +100,17 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=6144 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    algorithm.kl_ctrl.kl_coef=0.001 \
+    algorithm.kl_ctrl.kl_coef=0.0 \
     trainer.critic_warmup=0 \
     trainer.project_name='verl-hongli' \
     trainer.experiment_name=${EXP} \
     trainer.val_before_train=False \
+    trainer.resume_mode=disable \
     trainer.n_gpus_per_node=$NGPUS_PER_NODE \
     trainer.nnodes=$NNODES \
     trainer.test_freq=20 \
     trainer.default_hdfs_dir=null \
     trainer.default_local_dir=$PROJ_DIR \
     trainer.total_epochs=10
-

@@ -167,7 +167,8 @@ class KVCacheMemoryAgent(RAgent):
         meta_info = {
             "stage": "decode",
             "input_pad_to": max(len(msg) for msg in messages),
-            "pad_to": self.config.gen_pad_to,
+            # 只为最终回答填充到最大回答长度，避免把响应 pad 到 prompt 长度导致梯度阶段显存暴涨
+            "pad_to": self.config.max_final_response_length,
             "generation_kwargs": {
                 "max_tokens": self.config.gen_max_tokens_final_response,
                 "n": 1,

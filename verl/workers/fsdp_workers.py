@@ -162,7 +162,7 @@ class ActorRolloutRefWorker(Worker):
         role="actor",
     ):
         from torch import optim
-        from torch.distributed.fsdp import CPUOffload, MixedPrecision
+        from torch.distributed.fsdp import BackwardPrefetch, CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
 
@@ -254,6 +254,23 @@ class ActorRolloutRefWorker(Worker):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
+        backward_prefetch_cfg = fsdp_config.get("backward_prefetch", "post")
+        backward_prefetch = BackwardPrefetch.BACKWARD_POST
+        if backward_prefetch_cfg is None or backward_prefetch_cfg is False:
+            backward_prefetch = None
+        elif isinstance(backward_prefetch_cfg, str):
+            normalized = backward_prefetch_cfg.lower()
+            if normalized in ("none", "null"):
+                backward_prefetch = None
+            elif normalized in ("pre", "backward_pre"):
+                backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+            elif normalized in ("post", "backward_post"):
+                backward_prefetch = BackwardPrefetch.BACKWARD_POST
+            else:
+                raise ValueError(f"Unsupported backward_prefetch value: {backward_prefetch_cfg}")
+        else:
+            backward_prefetch = backward_prefetch_cfg
+
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
 
         if self._is_rollout and self.config.rollout.name == "hf":
@@ -264,6 +281,7 @@ class ActorRolloutRefWorker(Worker):
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        use_orig_params = fsdp_config.get("use_orig_params", False)
 
         # TODO: add transformer policy
         # We force reference policy to use CPUOffload to save memory.
@@ -281,7 +299,7 @@ class ActorRolloutRefWorker(Worker):
             actor_module,
             cpu_offload=cpu_offload,
             param_init_fn=init_fn,
-            use_orig_params=False,
+            use_orig_params=use_orig_params,
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
@@ -289,6 +307,7 @@ class ActorRolloutRefWorker(Worker):
             sync_module_states=True,
             device_mesh=self.device_mesh,
             forward_prefetch=False,
+            backward_prefetch=backward_prefetch,
         )
 
         log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)

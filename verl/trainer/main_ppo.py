@@ -72,6 +72,8 @@ def run_ppo(config) -> None:  # PPO 训练主流程
     # isolation, will solve in the future
     # 以上 TODO 保留：用于解决与 SGLang 的设备隔离冲突
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")  # 保留当前 CUDA_VISIBLE_DEVICES 设置
+    # 关闭 task event 上报，规避 Ray 2.40 在退出时 TaskEventBuffer Flush 的崩溃
+    os.environ.setdefault("RAY_task_events_report_interval_ms", "0")
     # 强制关闭任何已存在的Ray连接，确保启动新的本地实例
     if ray.is_initialized():
         ray.shutdown()
@@ -111,10 +113,14 @@ def run_ppo(config) -> None:  # PPO 训练主流程
             )
 
     runner = TaskRunner.remote()  # 创建远程任务执行器
-    ray.get(runner.run.remote(config))  # 在 Ray actor 中执行训练任务并同步等待完成
+    try:
+        ray.get(runner.run.remote(config))  # 在 Ray actor 中执行训练任务并同步等待完成
+    finally:
+        # 显式关闭，确保资源释放顺序稳定
+        ray.shutdown()
 
 
-@ray.remote(num_cpus=1)  # 请确保该 Actor 不运行在 head 节点（原注释），独占 1 个 CPU
+@ray.remote(num_cpus=1, enable_task_events=False)  # 请确保该 Actor 不运行在 head 节点（原注释），独占 1 个 CPU
 class TaskRunner:  # 封装在 Ray Actor 中执行训练逻辑，避免主进程阻塞
     def run(self, config):  # Ray 会在远程环境中调用此方法
         # 打印解析后的完整配置，便于排查
@@ -159,9 +165,10 @@ class TaskRunner:  # 封装在 Ray Actor 中执行训练逻辑，避免主进程
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role  # 资源池管理与角色枚举
 
+        remote_common_options = {"enable_task_events": False}
         role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),  # 将 actor rollout 角色绑定到 Ray 远程类
-            Role.Critic: ray.remote(CriticWorker),  # 将 critic 角色绑定到 Ray 远程类
+            Role.ActorRollout: ray.remote(actor_rollout_cls).options(**remote_common_options),  # 将 actor rollout 角色绑定到 Ray 远程类
+            Role.Critic: ray.remote(CriticWorker).options(**remote_common_options),  # 将 critic 角色绑定到 Ray 远程类
         }
 
         global_pool_id = "global_pool"  # 定义全局资源池名称
@@ -185,13 +192,13 @@ class TaskRunner:  # 封装在 Ray Actor 中执行训练逻辑，避免主进程
                 from verl.workers.megatron_workers import RewardModelWorker  # Megatron 奖励模型
             else:
                 raise NotImplementedError  # 其它策略暂不支持
-            role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)  # 注册奖励模型角色
+            role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker).options(**remote_common_options)  # 注册奖励模型角色
             mapping[Role.RewardModel] = global_pool_id  # 使用同一资源池
 
         # use reference model
         # 是否加载参考模型用于 KL 约束
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:  # 若需 KL 约束则加载参考模型
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)  # 复用 Actor worker 作为参考策略
+            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker).options(**remote_common_options)  # 复用 Actor worker 作为参考策略
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))  # 加载训练阶段奖励计算器

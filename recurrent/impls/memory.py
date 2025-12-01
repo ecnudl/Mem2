@@ -237,20 +237,30 @@ class MemoryAgent(RAgent):
             # 1. no need to pad prompt
             # 2. context padded for 2D indexing, elegant engineering
             # 3. no need to pad memory
-            prompt_i = gen_batch.non_tensor_batch['prompt_ids'][active_mask]
-            chunk_i = gen_batch.batch['context_ids'][active_mask, self.config.chunk_size * self.step: self.config.chunk_size * (self.step+1)] # bs * chunk_size
-            memory_i = self.memory[active_mask]
+            active_indices = torch.nonzero(active_mask, as_tuple=False).squeeze(-1)
+            prompt_i = [gen_batch.non_tensor_batch['prompt_ids'][idx] for idx in active_indices.tolist()]
+            chunk_i = gen_batch.batch['context_ids'][active_indices, self.config.chunk_size * self.step: self.config.chunk_size * (self.step+1)] # bs * chunk_size
+            # torch 索引 numpy 数组在只命中单元素时会返回标量 None，需转 list 确保始终得到可迭代对象
+            memory_i = self.memory[active_indices.tolist()]
             
             # format: we use our token_template to avoid decoding & formatting with str function & encoding back.
+            # 某些样本可能缺失 prompt 或 chunk（例如被过滤后为空），在格式化前兜底为可迭代的空/默认值，避免 None 触发 TypeError
+            def _safe_tokens(x):
+                if x is None:
+                    return torch.tensor([], dtype=torch.long)
+                if isinstance(x, torch.Tensor):
+                    return x.to(torch.long)
+                return torch.tensor(list(x), dtype=torch.long)
+
             self.messages = [
                 self.token_message_template.format(
-                        prompt=prompt,
-                        memory=memory if memory is not None else self.NO_MEMORY_TOKENS, # use pre-tokenized "No previous memory" for first round
-                        chunk=chunk[chunk != self.tokenizer.pad_token_id], # unpadding needed here
+                        prompt=_safe_tokens(prompt),
+                        memory=_safe_tokens(memory) if memory is not None else self.NO_MEMORY_TOKENS, # use pre-tokenized "No previous memory" for first round
+                        chunk=_safe_tokens(chunk[chunk != self.tokenizer.pad_token_id]) if chunk is not None else torch.tensor([], dtype=torch.long), # unpadding needed here
                 )
                 for prompt, memory, chunk in zip(prompt_i, memory_i, chunk_i)
             ]
-            sample_index = torch.arange(self.bsz, dtype=torch.long)[active_mask] # map active sample to original batch
+            sample_index = torch.arange(self.bsz, dtype=torch.long)[active_indices] # map active sample to original batch
             final_mask = torch.full(sample_index.shape, False, dtype=torch.bool) # all False
             self.meta_info = {'input_pad_to': self.max_input_length,
                          'pad_to': self.config.gen_pad_to,
@@ -266,7 +276,31 @@ class MemoryAgent(RAgent):
     @override
     def update(self, gen_output: DataProto) -> DataProto:
         if not self.is_final:
-            self.memory[self.active_mask] = unpad(self.tokenizer, gen_output.batch['responses'], remove_eos=True)
+            # 仅更新本轮参与生成的样本，避免 torch/numpy 索引形状不一致导致越界
+            responses = unpad(self.tokenizer, gen_output.batch['responses'], remove_eos=True)
+            sample_index = self.sample_index_list[-1].cpu().numpy()
+            if len(responses) != len(sample_index):
+                logger.warning(
+                    "Mismatch between responses (%s) and sample_index (%s), trimming to min.",
+                    len(responses),
+                    len(sample_index),
+                )
+                min_len = min(len(responses), len(sample_index))
+                responses = responses[:min_len]
+                sample_index = sample_index[:min_len]
+            # 防御性过滤，避免越界或重复索引导致的崩溃
+            valid_mask = sample_index < len(self.memory)
+            if not np.all(valid_mask):
+                logger.warning(
+                    "Sample index out of bound (len memory=%s), filtering invalid entries.",
+                    len(self.memory),
+                )
+                sample_index = sample_index[valid_mask]
+                responses = responses[valid_mask]
+            if len(sample_index) > 0:
+                self.memory[sample_index] = responses
+            else:
+                logger.warning("No valid sample_index to update memory; skip this turn.")
         self.log_step(gen_output)
         self.step += 1
         return gen_output

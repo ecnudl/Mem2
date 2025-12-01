@@ -42,6 +42,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 _INVALID_TOKEN_WARNING_EMITTED = False
 _RMPAD_FALLBACK_WARNING_EMITTED = False
+_RMPAD_NO_ZERO_WARNING_EMITTED = False
+_KV_POSITION_REBASE_WARNING_EMITTED = False
 
 
 def _sanitize_input_ids_for_model(
@@ -155,12 +157,36 @@ class DataParallelPPOActor(BasePPOActor):
                     use_rmpad = False
             # enforce binary mask and re-validate remove-padding safety
             attention_mask = (attention_mask != 0)
+            # KV rollouts carry absolute offsets in position_ids; strip them here so RoPE caches stay within the real sequence length during log-prob recompute
+            kv_rebased = False
+            if position_ids.dim() == 2:
+                pos_max = position_ids.max().item()
+                if pos_max >= position_ids.size(1):
+                    position_ids = torch.clamp_min(torch.cumsum(attention_mask.to(position_ids.dtype), dim=1) - 1, 0)
+                    kv_rebased = True
+            elif position_ids.dim() == 3:
+                pos_max = position_ids.max().item()
+                if pos_max >= position_ids.size(-1):
+                    base_pos = torch.clamp_min(torch.cumsum(attention_mask.to(position_ids.dtype), dim=1) - 1, 0)
+                    position_ids = base_pos.unsqueeze(1).expand(-1, position_ids.size(1), -1)
+                    kv_rebased = True
+            if kv_rebased:
+                global _KV_POSITION_REBASE_WARNING_EMITTED
+                if not _KV_POSITION_REBASE_WARNING_EMITTED:
+                    logger.warning("Rebased KV-offset position_ids to local offsets to avoid oversized rotary caches during log_prob recompute.")
+                    _KV_POSITION_REBASE_WARNING_EMITTED = True
             if use_rmpad and not _validate_rmpad_inputs(input_ids, attention_mask):
                 use_rmpad = False
                 global _RMPAD_FALLBACK_WARNING_EMITTED
                 if not _RMPAD_FALLBACK_WARNING_EMITTED:
                     logger.warning("Disable remove-padding for this micro-batch due to mask/index mismatch; falling back to padded forward to avoid CUDA gather asserts.")
                     _RMPAD_FALLBACK_WARNING_EMITTED = True
+            elif use_rmpad and not (position_ids == 0).any():
+                use_rmpad = False
+                global _RMPAD_NO_ZERO_WARNING_EMITTED
+                if not _RMPAD_NO_ZERO_WARNING_EMITTED:
+                    logger.warning("Disable remove-padding because position_ids contain no zero offset (likely from KV-prefill); falling back to padded forward to satisfy flash-attn varlen requirements.")
+                    _RMPAD_NO_ZERO_WARNING_EMITTED = True
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)

@@ -35,9 +35,13 @@ class RewardActor:
         import os
         logger.setLevel('INFO') # just need this for RAY
         # FIXME: use ray info to get the concurrency, or let it decided by RewardManager
-        self.concurrency = os.cpu_count() // 2
+        # Limit concurrency to avoid process explosion on high-core systems (e.g., 128 cores -> 64 workers)
+        # This prevents Ray resource exhaustion and segmentation faults
+        cpu_count = os.cpu_count()
+        max_concurrency = min(cpu_count // 2, 16)  # Cap at 16 workers
+        self.concurrency = max_concurrency
         self.executor = ProcessPoolExecutor(max_workers=self.concurrency)
-        logger.info(f"concurrency: {self.concurrency}")
+        logger.info(f"concurrency: {self.concurrency} (cpu_count={cpu_count})")
         self.tests = {}
         self.preload_test_file = preload_test_file
         if self.preload_test_file:

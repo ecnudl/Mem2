@@ -6,20 +6,18 @@ NGPUS_PER_NODE=1
 PROJ_ROOT=/home/admin123/dl/MemAgent/outputs
 DATASET_ROOT=/home/admin123/dl/MemAgent/taskutils/memory_data
 
-MODEL_PATH=/mnt/ssd2/models/Qwen2.5-7B-Instruct
+MODEL_PATH=/mnt/ssd2/models/Qwen2.5-1.5B-Instruct
 VAL_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_dev_20.parquet"
 TRAIN_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_train_1k.parquet"
-EXP=memory_agent/7B_kv
+EXP=memory_agent/1.5B_kv
 PROJ_DIR=${PROJ_ROOT}/${EXP}
 
-# 48G单卡配置：优化内存使用避免OOM
-# 关键优化：大幅降低序列长度和KV cache以减少激活值内存
-MAXLEN=256              # 从512降到256，减少50%激活值内存
-MAX_NEW_TOKEN=32        # 从40降到32，略微减少生成长度
-KV_CACHE_MAX_LEN=400    # 从800降到400，减少50% KV cache内存
-MAX_TOKEN_LEN_PER_GPU=400  # 从800降到400，限制总token数
+MAXLEN=1792
+MAX_NEW_TOKEN=192
+KV_CACHE_MAX_LEN=2560
+MAX_TOKEN_LEN_PER_GPU=3584
 
-SELECTED_GPU=1
+SELECTED_GPU=2
 echo "固定使用GPU ${SELECTED_GPU} 进行训练"
 
 # 激活conda环境（关键！确保Ray workers使用正确的Python环境）
@@ -29,8 +27,7 @@ conda activate memagent
 export CUDA_VISIBLE_DEVICES=${SELECTED_GPU}
 export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=1
-# 优化CUDA内存分配：使用更大的split size以减少碎片，启用可扩展段
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128,roundup_power2_divisions:16"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # 使用独立的临时目录，避免与其他Ray实例冲突
 export RAY_TMPDIR="/tmp/ray_kv_training_$$"
@@ -47,7 +44,7 @@ python3 -m verl.trainer.main_ppo_kv \
     recurrent.enable=memory \
     recurrent.memory.path=/home/admin123/dl/MemAgent/recurrent/impls/kvcache_memory.py \
     recurrent.memory.name=REGISTER \
-    recurrent.memory.config.chunk_size=128 \
+    recurrent.memory.config.chunk_size=1024 \
     recurrent.memory.config.max_prompt_length=${MAXLEN} \
     recurrent.memory.config.max_memorization_length=${MAX_NEW_TOKEN} \
     recurrent.memory.config.max_final_response_length=${MAX_NEW_TOKEN} \
@@ -79,20 +76,13 @@ python3 -m verl.trainer.main_ppo_kv \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.use_torch_compile=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=1 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
-    +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    +actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=bfloat16 \
-    +actor_rollout_ref.actor.fsdp_config.mixed_precision.reduce_dtype=bfloat16 \
-    +actor_rollout_ref.actor.fsdp_config.mixed_precision.buffer_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    +actor_rollout_ref.actor.fsdp_config.backward_prefetch=none \
-    +actor_rollout_ref.actor.fsdp_config.use_orig_params=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
@@ -117,8 +107,6 @@ python3 -m verl.trainer.main_ppo_kv \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.ppo_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
     critic.forward_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
-    critic.model.fsdp_config.param_offload=True \
-    critic.model.fsdp_config.optimizer_offload=True \
     reward_model.forward_max_token_len_per_gpu=${MAX_TOKEN_LEN_PER_GPU} \
     algorithm.kl_ctrl.kl_coef=0.0 \
     trainer.critic_warmup=0 \
