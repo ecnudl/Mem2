@@ -1,0 +1,83 @@
+#!/bin/bash
+# MemAgent Evaluation Configuration File
+# Source this file before running evaluation: source eval_config.rc
+
+# ==================== Path Configuration ====================
+# Base paths
+export MEMAGENT_ROOT="/home/admin123/dl/MemAgent"
+export BASE_MODEL="/mnt/ssd2/models/Qwen2.5-0.5B-Instruct"
+export CHECKPOINT_BASE="${MEMAGENT_ROOT}/outputs/memory_agent/0.5B_kv"
+export MERGED_MODEL_BASE="${MEMAGENT_ROOT}/merged_models"
+export RESULT_BASE="${MEMAGENT_ROOT}/taskutils/memory_eval/results"
+export DATAROOT="${MEMAGENT_ROOT}/taskutils/memory_data/hotpotqa"
+
+# ==================== Conda Environment ====================
+export CONDA_ENV="memagent"
+export CONDA_SH="${HOME}/anaconda3/etc/profile.d/conda.sh"
+
+# ==================== GPU Configuration ====================
+export CUDA_VISIBLE_DEVICES="6"  # Set GPU IDs to use
+
+# ==================== vLLM Service Configuration ====================
+export VLLM_PORT="8000"
+export VLLM_HOST="127.0.0.1"
+export VLLM_MAX_MODEL_LEN="3072"
+export VLLM_GPU_MEMORY_UTIL="0.60"
+export VLLM_DTYPE="bfloat16"
+
+# ==================== Evaluation Configuration ====================
+# Must match training configuration!
+export RECURRENT_CHUNK_SIZE="1024"           # chunk_size in training
+export RECURRENT_MAX_NEW="192"               # max_memorization/final_response_length
+export RECURRENT_MAX_CONTEXT_LEN="120000"    # max input context length
+
+# Evaluation dataset
+export EVAL_LENGTH="100"                      # 50, 100, 200, 400, 800, 1600, 3200, 6400
+export EVAL_API="recurrent"                   # recurrent, recurrent-boxed, boxed
+export EVAL_N_PROC="64"                       # Concurrent requests
+export EVAL_MODEL_NAME="Qwen2.5-0.5B-Instruct"  # Public model id exposed via vLLM
+export SERVED_MODEL_NAME="${EVAL_MODEL_NAME}"   # Keep served id in sync with evaluation
+
+# ==================== Checkpoint Configuration ====================
+# Checkpoints to evaluate (space-separated list)
+export CHECKPOINT_STEPS="1000 2000 2500"
+
+# Or evaluate a single checkpoint
+# export SINGLE_CHECKPOINT="10000"
+
+# ==================== Advanced Options ====================
+# Model identifier for summary file naming (auto-detected if not set)
+# Example: "1.5B_kv", "7B_text", etc.
+# export MODEL_IDENTIFIER="1.5B_kv"
+
+# Whether to keep merged models after evaluation (yes/no)
+export KEEP_MERGED_MODELS="yes"
+
+# Whether to force re-merge existing checkpoints (yes/no)
+export FORCE_MERGE="no"
+
+# Whether to force re-evaluate existing results (yes/no)
+export FORCE_EVAL="yes"
+
+# vLLM startup wait time (seconds)
+export VLLM_STARTUP_WAIT="60"
+
+# Log directory
+export LOG_DIR="${MEMAGENT_ROOT}/eval_logs"
+
+# ==================== Derived Variables (DO NOT EDIT) ====================
+export SERVE_PORT="${VLLM_PORT}"
+export SERVE_HOST="${VLLM_HOST}"
+export URL="http://${VLLM_HOST}:${VLLM_PORT}/v1"
+export API_KEY="memagent-eval-key"
+
+echo "MemAgent Evaluation Configuration Loaded:"
+echo "  - Root: ${MEMAGENT_ROOT}"
+echo "  - Base Model: ${BASE_MODEL}"
+echo "  - Checkpoint Base: ${CHECKPOINT_BASE}"
+echo "  - Results: ${RESULT_BASE}"
+echo "  - vLLM Port: ${VLLM_PORT}"
+echo "  - Chunk Size: ${RECURRENT_CHUNK_SIZE}"
+echo "  - Max New Tokens: ${RECURRENT_MAX_NEW}"
+echo "  - Eval Length: ${EVAL_LENGTH}"
+echo "  - Eval Model ID: ${EVAL_MODEL_NAME}"
