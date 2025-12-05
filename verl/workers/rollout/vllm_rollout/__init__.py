@@ -38,10 +38,19 @@ else:
     package_version = get_version(package_name)
 ###
 
-if package_version <= "0.6.3":
+# Debug: print version for troubleshooting
+print(f"[vllm_rollout] Detected vLLM version: {package_version}")
+
+# Use proper version comparison
+from packaging import version as pkg_version
+if package_version and pkg_version.parse(package_version) <= pkg_version.parse("0.6.3"):
     vllm_mode = "customized"
+    print(f"[vllm_rollout] Using customized mode for vLLM <= 0.6.3")
     from .fire_vllm_rollout import FIREvLLMRollout  # noqa: F401
     from .vllm_rollout import vLLMRollout  # noqa: F401
+    # For compatibility, provide a dummy vLLMAsyncRollout if needed
+    vLLMAsyncRollout = None
 else:
     vllm_mode = "spmd"
+    print(f"[vllm_rollout] Using spmd mode for vLLM > 0.6.3")
     from .vllm_rollout_spmd import vLLMAsyncRollout, vLLMRollout  # noqa: F401

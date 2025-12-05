@@ -44,8 +44,18 @@ class HFRollout(BaseRollout):
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
+
+        # Add barrier to ensure all ranks start generation together (workaround for FSDP hang issue)
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)
+
+        # Add barrier after generation completes
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         return output
 
     @torch.no_grad()

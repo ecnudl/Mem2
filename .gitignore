@@ -127,3 +127,6 @@ logs
 log
 outputs
 deduplication
+
+# merged model checkpoints (large binary files)
+merged_models/

@@ -90,6 +90,11 @@ def run_ppo(config) -> None:  # PPO 训练主流程
         # 传递CUDA_VISIBLE_DEVICES到Ray worker
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         runtime_env_vars = {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
+        # 透传关键 CUDA/NCCL 环境变量到 Ray worker，确保分布式配置生效
+        for _env in ["CUDA_DEVICE_ORDER", "NCCL_P2P_DISABLE", "NCCL_IB_DISABLE", "NCCL_P2P_LEVEL", "NCCL_SHM_DISABLE"]:
+            _val = os.environ.get(_env)
+            if _val:
+                runtime_env_vars[_env] = _val
         if cuda_visible_devices:
             runtime_env_vars["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
             runtime_env_vars["PYTORCH_CUDA_ALLOC_CONF"] = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")

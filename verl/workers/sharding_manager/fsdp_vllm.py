@@ -89,6 +89,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         #
         # pytorch: https://pytorch.org/docs/stable/notes/cuda.html#memory-management
         # vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/device_allocator/cumem.py#L103
+        if torch.distributed.get_rank() == 0:
+            print(f"[SHARDING] __enter__ START - rank 0")
         torch.cuda.empty_cache()
 
         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
@@ -120,10 +122,27 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                 offload_fsdp_model_to_cpu(self.module)
             torch.cuda.empty_cache()
 
+            # Synchronize all ranks before waking up kv_cache to avoid deadlock
+            if torch.distributed.is_initialized():
+                if torch.distributed.get_rank() == 0:
+                    print(f"[SHARDING] barrier before wake_up(kv_cache)")
+                torch.distributed.barrier()
+
             if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                if torch.distributed.get_rank() == 0:
+                    print(f"[SHARDING] calling wake_up(tags=['kv_cache'])")
                 self.inference_engine.wake_up(tags=["kv_cache"])
 
         log_gpu_memory_usage("After del state_dict and empty_cache in sharding manager", logger=logger)
+
+        # Final barrier to ensure all ranks complete __enter__ before generation
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f"[SHARDING] final barrier in __enter__")
+            torch.distributed.barrier()
+
+        if torch.distributed.get_rank() == 0:
+            print(f"[SHARDING] __enter__ COMPLETED")
 
         # important: need to manually set the random states of each tp to be identical.
         if self.device_mesh is not None:
@@ -132,6 +151,14 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
+        if torch.distributed.get_rank() == 0:
+            print(f"[SHARDING] __exit__ START")
+        # Synchronize all ranks before sleep to ensure generation is complete
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f"[SHARDING] barrier before sleep")
+            torch.distributed.barrier()
+
         # TODO(ZSL): check this
         if vllm_version in (
             "0.5.4",
@@ -139,6 +166,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         ):
             self.inference_engine.offload_model_weights()
         else:
+            if torch.distributed.get_rank() == 0:
+                print(f"[SHARDING] calling sleep(level=1)")
             self.inference_engine.sleep(level=1)
 
         self.module.train()

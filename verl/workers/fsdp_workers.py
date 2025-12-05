@@ -564,7 +564,7 @@ class ActorRolloutRefWorker(Worker):
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
         if torch.distributed.get_rank() == 0:
-            print(f"{_now()} fsdp_workers generate_sequences")
+            print(f"{_now()} fsdp_workers generate_sequences START")
         prompts = prompts.to(torch.cuda.current_device())
 
         assert self._is_rollout
@@ -574,6 +574,8 @@ class ActorRolloutRefWorker(Worker):
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
         }
         prompts.meta_info.update(meta_info)
+        if torch.distributed.get_rank() == 0:
+            print(f"{_now()} fsdp_workers entering rollout_sharding_manager")
         with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 

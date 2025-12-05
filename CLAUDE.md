@@ -58,6 +58,12 @@ bash run_memory_7B.sh
 ```
 Configure `PROJ_ROOT`, `DATASET_ROOT`, and `MODEL_PATH` inside the script first.
 
+**7B Model (Multi-GPU on Single Node)**:
+```bash
+bash 7Bnodes.sh
+```
+Default uses 4 GPUs with FSDP. Set `CUDA_VISIBLE_DEVICES`, `NGPUS_PER_NODE`, and `FSDP_SIZE` to customize GPU configuration. Includes NCCL optimization settings for single-node multi-GPU training.
+
 **14B Model (Multi-Node)**:
 ```bash
 bash run_memory_14B.sh
@@ -86,6 +92,28 @@ cd taskutils/memory_eval
 python run.py
 ```
 Uses all available GPUs via Ray serve. Set `SERVE_PORT` and `DASH_PORT` if using Ray cluster.
+
+**Checkpoint Evaluation (Recommended Workflow)**:
+```bash
+# 1. Configure evaluation parameters
+source eval_config.rc
+# Edit eval_config.rc to set: CHECKPOINT_BASE, BASE_MODEL, CHECKPOINT_STEPS, EVAL_LENGTH, etc.
+
+# 2. Run automated evaluation pipeline
+bash eval_checkpoint.sh
+```
+The `eval_checkpoint.sh` script automates the full evaluation workflow:
+- Merges FSDP checkpoints with base model (saves to `merged_models/`)
+- Launches vLLM server for each checkpoint
+- Runs evaluation on configured dataset lengths
+- Generates summary reports with accuracy metrics
+- Supports batch processing multiple checkpoints
+
+Key configuration in `eval_config.rc`:
+- `CHECKPOINT_STEPS`: Space-separated list of checkpoint steps to evaluate
+- `EVAL_LENGTH`: Document count (50, 100, 200, 400, 800, 1600, 3200, 6400)
+- `RECURRENT_CHUNK_SIZE`, `RECURRENT_MAX_NEW`: Must match training config
+- `FORCE_MERGE/FORCE_EVAL`: Control whether to skip existing merged models/results
 
 **Inference Quickstart**:
 ```bash
@@ -221,3 +249,32 @@ pre-commit install
 - Monitor `kv_cache_max_length` to avoid OOM - KV cache consumes significant GPU memory
 - Verify rollout mode supports KV cache if switching from text memory (`verl/workers/fsdp_workers.py` → `_build_rollout`)
 - Use `trainer.logger=['console']` for local debugging instead of wandb
+
+### Common Issues
+
+**Ray Connection Conflicts**:
+If training hangs or fails to start due to existing Ray clusters:
+```bash
+# Disconnect from any existing Ray cluster
+export RAY_ADDRESS=""
+unset RAY_ADDRESS
+python3 -c "import ray; ray.shutdown()"
+```
+Training scripts now use isolated Ray temporary directories (`RAY_TMPDIR`) to avoid conflicts.
+
+**NCCL/CUDA Errors in Multi-GPU**:
+For single-node multi-GPU training encountering NCCL P2P or IB errors:
+- Scripts like `7Bnodes.sh` already set `NCCL_P2P_DISABLE=1`, `NCCL_IB_DISABLE=1`
+- Use `CUDA_DEVICE_ORDER=PCI_BUS_ID` to ensure consistent GPU ordering
+- Check `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set to reduce fragmentation
+
+**Training Data Not Found**:
+If training fails with missing data file:
+- Ensure `DATASET_ROOT` points to correct directory containing `hotpotqa/` subdirectory
+- Check that both `hotpotqa_train.parquet` and `hotpotqa_dev.parquet` exist
+- For smaller experiments, some scripts (e.g., `7Bnodes.sh`) auto-create `hotpotqa_train_1k.parquet` if missing
+
+**Checkpoint Evaluation Failures**:
+- Verify `RECURRENT_CHUNK_SIZE` and `RECURRENT_MAX_NEW` in `eval_config.rc` match training parameters
+- Ensure merged model exists in `merged_models/` or set `FORCE_MERGE=yes` to regenerate
+- Check vLLM can access sufficient GPU memory (adjust `VLLM_GPU_MEMORY_UTIL` if needed)

@@ -150,9 +150,6 @@ class vLLMRollout(BaseRollout):
             seed=config.get("seed", 0),
         )
 
-        # Offload vllm model to reduce peak memory usage
-        self.inference_engine.sleep(level=1)
-
         kwargs = dict(
             n=1,
             logprobs=0,  # can be set to 0 and let actor to recompute
@@ -202,19 +199,9 @@ class vLLMRollout(BaseRollout):
     #         `pad_to` is used when it is passed, else we use sampling_params.max_tokens
     #####
     def generate_sequences(self, prompts: DataProto, pad_to=None, **kwargs) -> DataProto:
-        # rebuild vllm cache engine
-        if (
-            vllm_version
-            in (
-                "0.5.4",
-                "0.6.3",
-            )
-            and self.config.free_cache_engine
-        ):
-            self.inference_engine.init_cache_engine()
         start_time = time.time()
         if torch.distributed.get_rank() == 0:
-            print(f"{_now()} start")
+            print(f"{_now()} vLLM generate_sequences start")
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
@@ -282,6 +269,13 @@ class vLLMRollout(BaseRollout):
             prepared_time = time.time()
             if torch.distributed.get_rank() == 0:
                 print(f"prepare time: {prepared_time - start_time}")
+
+            # Ensure all ranks are synchronized before vLLM generation
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+                if torch.distributed.get_rank() == 0:
+                    print(f"{_now()} All ranks synchronized, starting vLLM generation...")
+
             outputs = self.inference_engine.generate(
                 prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
