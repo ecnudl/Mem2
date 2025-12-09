@@ -214,9 +214,16 @@ class MemoryAgent(RAgent):
         active_mask = self.allowed_ctx_length > self.step * self.config.chunk_size
         self.active_mask = active_mask
         gen_batch = self.gen_batch
-        # if all context is used, and its not done, then it will be the final turn for this batch
-        if active_mask.sum().item() == 0:
+        # if all context is used, or max_chunks reached, then it will be the final turn for this batch
+        # CRITICAL FIX: Force FINAL TURN after max_chunks to ensure \boxed{} generation
+        max_chunks_reached = self.step >= self.config.max_chunks
+        all_context_used = active_mask.sum().item() == 0
+        if all_context_used or max_chunks_reached:
             self.is_final = True
+            if max_chunks_reached and not all_context_used:
+                logger.info(f'FINAL TURN triggered by max_chunks={self.config.max_chunks} (context not fully read)')
+            else:
+                logger.info(f'FINAL TURN triggered by all context used')
             self.messages = [
                 self.token_final_message_template.format(
                     prompt=prompt,
