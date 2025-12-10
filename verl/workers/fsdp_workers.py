@@ -159,6 +159,10 @@ class ActorRolloutRefWorker(Worker):
         enable_gradient_checkpointing=False,
         trust_remote_code=False,
         use_liger=False,
+        lora_rank=0,
+        lora_alpha=16,
+        lora_dropout=0.0,
+        target_modules="all-linear",
         role="actor",
     ):
         from torch import optim
@@ -229,6 +233,31 @@ class ActorRolloutRefWorker(Worker):
 
                 _apply_liger_kernel_to_instance(model=actor_module)
 
+            # Apply LoRA if lora_rank > 0
+            if lora_rank > 0:
+                from peft import LoraConfig, TaskType, get_peft_model
+
+                # Enable input gradients for LoRA
+                actor_module.enable_input_require_grads()
+
+                lora_config_dict = {
+                    "task_type": TaskType.CAUSAL_LM,
+                    "r": lora_rank,
+                    "lora_alpha": lora_alpha,
+                    "lora_dropout": lora_dropout,
+                    "target_modules": target_modules,
+                    "bias": "none",
+                    "inference_mode": False,
+                }
+
+                if self.rank == 0:
+                    print(f"[{role}] Applying LoRA with config: {lora_config_dict}")
+
+                actor_module = get_peft_model(actor_module, LoraConfig(**lora_config_dict))
+
+                if self.rank == 0:
+                    actor_module.print_trainable_parameters()
+
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
@@ -271,7 +300,7 @@ class ActorRolloutRefWorker(Worker):
         else:
             backward_prefetch = backward_prefetch_cfg
 
-        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None), is_lora=(lora_rank > 0))
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
@@ -468,6 +497,10 @@ class ActorRolloutRefWorker(Worker):
                 enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
+                lora_rank=self.config.model.get("lora_rank", 0),
+                lora_alpha=self.config.model.get("lora_alpha", 16),
+                lora_dropout=self.config.model.get("lora_dropout", 0.0),
+                target_modules=self.config.model.get("target_modules", "all-linear"),
                 role="actor",
             )
 
@@ -500,6 +533,10 @@ class ActorRolloutRefWorker(Worker):
                 use_remove_padding=use_remove_padding,
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 use_liger=self.config.model.get("use_liger", False),
+                lora_rank=0,  # ref model doesn't use LoRA
+                lora_alpha=16,
+                lora_dropout=0.0,
+                target_modules="all-linear",
                 role="ref",
             )[0]
             OmegaConf.set_struct(self.config.ref, True)

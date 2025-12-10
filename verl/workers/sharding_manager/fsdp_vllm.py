@@ -97,6 +97,40 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         if self.offload_param:
             load_fsdp_model_to_gpu(self.module)
         params = self.module.state_dict()
+
+        # Handle PEFT (LoRA) models: remove 'base_model.model.' prefix from keys
+        # PEFT wraps the model as PeftModel which contains base_model.model.<original_key>
+        # Additionally, LoRA renames original weights to '<layer>.base_layer.weight'
+        # and adds LoRA-specific weights like 'lora_A', 'lora_B', etc.
+        # vLLM expects only the original base model weights without these LoRA components
+        if any(key.startswith("base_model.model.") for key in params.keys()):
+            new_params = {}
+            prefix_to_remove = "base_model.model."
+            lora_keywords = ["lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B", "modules_to_save"]
+
+            for key, value in params.items():
+                # Skip any LoRA-specific weights (they contain 'lora' in the key)
+                if any(kw in key for kw in lora_keywords):
+                    continue
+
+                if key.startswith(prefix_to_remove):
+                    # Remove 'base_model.model.' prefix
+                    new_key = key[len(prefix_to_remove):]
+
+                    # Remove '.base_layer' suffix if present (LoRA specific)
+                    # E.g., 'layers.0.self_attn.qkv_proj.base_layer.weight' -> 'layers.0.self_attn.qkv_proj.weight'
+                    if ".base_layer." in new_key:
+                        new_key = new_key.replace(".base_layer.", ".")
+
+                    new_params[new_key] = value
+                else:
+                    # Keep other keys (but already filtered LoRA above)
+                    new_params[key] = value
+
+            params = new_params
+            if torch.distributed.get_rank() == 0:
+                print(f"[SHARDING] Detected LoRA model, extracted {len(params)} base model parameters (LoRA adapters excluded)")
+
         log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
         # Copy, not share memory
         load_format = "hf" if self.full_params else "dtensor"

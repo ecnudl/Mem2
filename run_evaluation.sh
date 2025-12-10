@@ -219,6 +219,28 @@ PY
     echo "${adjusted}"
 }
 
+function detect_lora_checkpoint() {
+    local ckpt_dir=$1
+    # Check if any checkpoint file contains LoRA structure
+    for ckpt_file in "${ckpt_dir}"/model_world_size_*_rank_0.pt; do
+        if [ -f "${ckpt_file}" ]; then
+            # Quick check: does the checkpoint contain lora_A or base_model keys?
+            python3 -c "
+import torch
+try:
+    state_dict = torch.load('${ckpt_file}', map_location='cpu', weights_only=False)
+    keys = list(state_dict.keys())
+    has_lora = any('lora_A' in k or 'lora_B' in k or 'base_model' in k for k in keys[:100])
+    exit(0 if has_lora else 1)
+except Exception:
+    exit(1)
+" 2>/dev/null
+            return $?
+        fi
+    done
+    return 1
+}
+
 function merge_checkpoint() {
     local step=$1
     local ckpt_dir="${CHECKPOINT_BASE}/global_step_${step}/actor"
@@ -236,12 +258,43 @@ function merge_checkpoint() {
     fi
 
     log_step "Merging checkpoint: global_step_${step}"
-    python scripts/model_merger.py \
-        --backend fsdp \
-        --hf_model_path "${BASE_MODEL}" \
-        --local_dir "${ckpt_dir}" \
-        --target_dir "${merged_dir}" \
-        2>&1 | tee "${LOG_DIR}/merge_step${step}.log"
+
+    # Detect if this is a LoRA checkpoint
+    local is_lora_ckpt=0
+    if detect_lora_checkpoint "${ckpt_dir}"; then
+        is_lora_ckpt=1
+        log_step "Detected LoRA checkpoint - using LoRA merger"
+    else
+        log_step "Standard checkpoint - using FSDP merger"
+    fi
+
+    if [ ${is_lora_ckpt} -eq 1 ]; then
+        # Use LoRA merger with LoRA parameters from config
+        local lora_rank="${LORA_RANK:-64}"
+        local lora_alpha="${LORA_ALPHA:-32}"
+        log_step "LoRA parameters: rank=${lora_rank}, alpha=${lora_alpha}"
+
+        python scripts/lora_merger.py \
+            --hf_model_path "${BASE_MODEL}" \
+            --local_dir "${ckpt_dir}" \
+            --target_dir "${merged_dir}" \
+            --lora_rank ${lora_rank} \
+            --lora_alpha ${lora_alpha} \
+            2>&1 | tee "${LOG_DIR}/merge_step${step}.log"
+    else
+        # Use standard FSDP merger
+        python scripts/model_merger.py \
+            --backend fsdp \
+            --hf_model_path "${BASE_MODEL}" \
+            --local_dir "${ckpt_dir}" \
+            --target_dir "${merged_dir}" \
+            2>&1 | tee "${LOG_DIR}/merge_step${step}.log"
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "Error: Merge failed for step ${step}"
+        return 1
+    fi
 
     log_step "Merge completed: ${merged_dir}"
     ensure_tokenizer_files "${merged_dir}"

@@ -60,16 +60,8 @@ def _default_compute_score(data_source, solution_str, ground_truth, extra_info=N
 
         res = geo3k.compute_score(solution_str, ground_truth)
     elif data_source in ['hotpotqa'] or (isinstance(data_source, str) and data_source.startswith('hotpotqa')):
-        # Check if shaped reward is enabled via environment variable
-        import os
-        use_shaped = os.getenv('USE_SHAPED_REWARD', 'false').lower() == 'true'
-
-        if use_shaped:
-            from . import hotpotqa_shaped
-            res = hotpotqa_shaped.compute_score(solution_str, ground_truth)
-        else:
-            from . import hotpotqa
-            res = hotpotqa.compute_score(solution_str, ground_truth)
+        from . import hotpotqa
+        res = hotpotqa.compute_score(solution_str, ground_truth)
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 
