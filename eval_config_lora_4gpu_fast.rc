@@ -1,0 +1,111 @@
+#!/bin/bash
+# MemAgent Evaluation Configuration File for 7B LoRA 4-GPU Fast Training Results
+# Training: lora_4gpu_fast_15k_n2 (GPUs 0,2,3,4 with LoRA rank=64)
+# Source this file before running evaluation: source eval_config_lora_4gpu_fast.rc
+
+# ==================== Path Configuration ====================
+# Base paths
+export MEMAGENT_ROOT="/home/admin123/dl/MemAgent"
+export BASE_MODEL="/mnt/ssd2/models/Qwen2.5-7B-Instruct"
+export CHECKPOINT_BASE="${MEMAGENT_ROOT}/outputs/lora_4gpu_fast_15k_n2"
+export MERGED_MODEL_BASE="${MEMAGENT_ROOT}/merged_models"
+export RESULT_BASE="${MEMAGENT_ROOT}/taskutils/memory_eval/results"
+export DATAROOT="${MEMAGENT_ROOT}/taskutils/memory_data/hotpotqa"
+
+# ==================== Conda Environment ====================
+export CONDA_ENV="memagent"
+export CONDA_SH="${HOME}/anaconda3/etc/profile.d/conda.sh"
+
+# ==================== GPU Configuration ====================
+# Use GPU 1 for evaluation (training uses GPUs 0,2,3,4)
+# Choose a GPU that's not being used for training
+export CUDA_VISIBLE_DEVICES="7"
+
+# ==================== vLLM Service Configuration ====================
+export VLLM_PORT="8008"  # Use unique port for LoRA 4-GPU evaluation
+export VLLM_HOST="127.0.0.1"
+export VLLM_MAX_MODEL_LEN="16384"  # Max context for merged model (slightly larger than training MAXLEN)
+export VLLM_GPU_MEMORY_UTIL="0.75"  # 7B merged model with LoRA, use moderate utilization
+export VLLM_DTYPE="bfloat16"
+
+# ==================== Evaluation Configuration ====================
+# MUST match training configuration from resume_lora_4gpu_fast.sh!
+export RECURRENT_CHUNK_SIZE="2500"           # chunk_size in training (line 64)
+export RECURRENT_MAX_NEW="1024"              # max_memorization/final_response_length (line 61)
+export RECURRENT_MAX_CONTEXT_LEN="15000"     # max input context length (line 60)
+
+# Evaluation dataset
+export EVAL_LENGTH="100"                      # 50, 100, 200, 400, 800, 1600, 3200, 6400
+export EVAL_API="recurrent"                   # recurrent, recurrent-boxed, boxed
+export EVAL_N_PROC="32"                       # Concurrent requests
+export EVAL_MODEL_NAME="Qwen2.5-7B-Instruct-LoRA-Fast"  # Model name for evaluation
+export SERVED_MODEL_NAME="${EVAL_MODEL_NAME}"   # Keep served id in sync
+
+# ==================== Checkpoint Configuration ====================
+# Checkpoints to evaluate (space-separated list)
+# Your training has: global_step_100 (and potentially more as training progresses)
+export CHECKPOINT_STEPS="100"
+
+# Or evaluate a single checkpoint (uncomment to use)
+# export SINGLE_CHECKPOINT="100"
+
+# ==================== LoRA Configuration ====================
+# LoRA parameters (MUST match training configuration!)
+export LORA_RANK="64"    # LoRA rank from resume_lora_4gpu_fast.sh (line 150)
+export LORA_ALPHA="32"   # LoRA alpha from resume_lora_4gpu_fast.sh (line 151)
+
+# ==================== Advanced Options ====================
+# Model identifier for summary file naming
+export MODEL_IDENTIFIER="lora_4gpu_fast_15k_n2"
+
+# Whether to keep merged models after evaluation (yes/no)
+# Recommend "yes" for 7B LoRA models to avoid re-merging
+export KEEP_MERGED_MODELS="yes"
+
+# Whether to force re-merge existing checkpoints (yes/no)
+export FORCE_MERGE="no"
+
+# Whether to force re-evaluate existing results (yes/no)
+export FORCE_EVAL="no"
+
+# vLLM startup wait time (seconds) - 7B model needs time to load
+export VLLM_STARTUP_WAIT="90"
+
+# Log directory
+export LOG_DIR="${MEMAGENT_ROOT}/eval_logs_lora_4gpu_fast"
+
+# ==================== Derived Variables (DO NOT EDIT) ====================
+export SERVE_PORT="${VLLM_PORT}"
+export SERVE_HOST="${VLLM_HOST}"
+export URL="http://${VLLM_HOST}:${VLLM_PORT}/v1"
+export API_KEY="memagent-eval-key"
+
+echo "========================================="
+echo "MemAgent Evaluation Configuration Loaded"
+echo "========================================="
+echo "Training: 7B LoRA 4-GPU Fast (lora_4gpu_fast_15k_n2)"
+echo "  - Root: ${MEMAGENT_ROOT}"
+echo "  - Base Model: ${BASE_MODEL}"
+echo "  - Checkpoint Base: ${CHECKPOINT_BASE}"
+echo "  - Checkpoints: ${CHECKPOINT_STEPS}"
+echo "  - Merged Models: ${MERGED_MODEL_BASE}"
+echo "  - Results: ${RESULT_BASE}"
+echo ""
+echo "Evaluation Settings:"
+echo "  - GPU: ${CUDA_VISIBLE_DEVICES}"
+echo "  - vLLM Port: ${VLLM_PORT}"
+echo "  - Chunk Size: ${RECURRENT_CHUNK_SIZE}"
+echo "  - Max New Tokens: ${RECURRENT_MAX_NEW}"
+echo "  - Max Context Length: ${RECURRENT_MAX_CONTEXT_LEN}"
+echo "  - Eval Length: ${EVAL_LENGTH} documents"
+echo "  - Eval API: ${EVAL_API}"
+echo "  - Model Identifier: ${MODEL_IDENTIFIER}"
+echo ""
+echo "LoRA Training Info:"
+echo "  - LoRA Rank: 64"
+echo "  - LoRA Alpha: 32"
+echo "  - Training GPUs: 0,2,3,4"
+echo "  - Context Length: 15k tokens"
+echo "  - GRPO Sampling: n=2"
+echo "  - Batch Size: 16"
+echo "========================================="

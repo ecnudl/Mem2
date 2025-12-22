@@ -49,12 +49,12 @@ EXP=lora_1k_2gpu_r64
 PROJ_DIR=${PROJ_ROOT}/${EXP}
 
 # vLLM inference length
-MAXLEN=256
-MAX_NEW_TOKEN=64
+MAXLEN=5000
+MAX_NEW_TOKEN=1024
 
 # LoRA allows much higher learning rate than full fine-tuning!
 # Full fine-tuning uses 1e-6, LoRA can use 50x higher
-LEARNING_RATE=5e-5
+LEARNING_RATE=1e-5
 
 # Token limit per GPU - optimized for 2x 48GB GPUs
 # With more memory per GPU (2 GPUs vs 4), we can increase this
@@ -90,7 +90,7 @@ echo "========================================"
 
 python3 -m verl.trainer.main_ppo \
     recurrent.enable=memory \
-    recurrent.memory.config.chunk_size=1536 \
+    recurrent.memory.config.chunk_size=2000 \
     recurrent.memory.config.max_chunks=16 \
     recurrent.memory.config.max_memorization_length=${MAX_NEW_TOKEN} \
     recurrent.memory.config.max_final_response_length=${MAX_NEW_TOKEN} \

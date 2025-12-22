@@ -15,7 +15,7 @@ export RAY_TMPDIR=/home/admin123/dl/MemAgent/outputs/ray_tmp
 mkdir -p "$RAY_TMPDIR"
 
 # 固定使用 4 GPU（Text Memory mode 4卡 FSDP，优化显存分配）；如需改卡，直接修改这里
-export CUDA_VISIBLE_DEVICES=1,2,3,4
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 # 按 PCI 拓扑排序设备，避免映射混乱
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 # 关闭 NCCL P2P/IB，防止不支持的 peer access 报错
@@ -41,12 +41,12 @@ DATASET_ROOT=/home/admin123/dl/MemAgent/taskutils/memory_data
 MODEL_PATH=/mnt/ssd2/models/Qwen2.5-7B-Instruct
 VAL_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_dev_20.parquet"
 TRAIN_PATH="${DATASET_ROOT}/hotpotqa/hotpotqa_train_1k.parquet"
-EXP=text_1k_4gpu_optimized
+EXP=all_1k_4gpu
 PROJ_DIR=${PROJ_ROOT}/${EXP}
 
 # vLLM 推理长度；Recurrent 框架使用 task config 的 max_length
-MAXLEN=256
-MAX_NEW_TOKEN=64
+MAXLEN=8192
+MAX_NEW_TOKEN=1024
 
 # 多卡FSDP优化：每卡显存更充裕，可以增大token限制
 # 原配置：2656 tokens/GPU (2卡)
@@ -67,17 +67,21 @@ fi
 python3 -c "import ray; ray.shutdown()" 2>/dev/null || true
 export RAY_DISABLE_IMPORT_WARNING=1
 
+# 限制 Ray 对象存储大小，避免磁盘占满
+export RAY_object_store_memory=10000000000  # 10GB
+export RAY_plasma_store_socket_name="${RAY_TMPDIR}/plasma_store"
+
 python3 -m verl.trainer.main_ppo \
     recurrent.enable=memory \
-    recurrent.memory.config.chunk_size=1536 \
+    recurrent.memory.config.chunk_size=5000 \
     recurrent.memory.config.max_chunks=16 \
     recurrent.memory.config.max_memorization_length=${MAX_NEW_TOKEN} \
     recurrent.memory.config.max_final_response_length=${MAX_NEW_TOKEN} \
     algorithm.adv_estimator=grpo \
     algorithm.grpo_use_adv=False \
-    trainer.save_freq=1000 \
-    actor_rollout_ref.rollout.n=1 \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    trainer.save_freq=100 \
+    actor_rollout_ref.rollout.n=4 \
+    actor_rollout_ref.rollout.val_kwargs.n=2 \
     trainer.logger=['console'] \
     actor_rollout_ref.actor.optim.lr_warmup_steps=20 \
     actor_rollout_ref.actor.clip_ratio_high=0.20 \
@@ -86,7 +90,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$VAL_PATH \
     data.shuffle=False \
     data.filter_overlong_prompts=True \
-    data.train_batch_size=4 \
+    data.train_batch_size=12 \
     data.truncation='center' \
     +data.context_key='context' \
     data.max_prompt_length=$MAXLEN \
@@ -95,18 +99,18 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=$MODEL_PATH  \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=6 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${MAX_TOKEN_PER_GPU} \
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${MAX_TOKEN_PER_GPU} \
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${MAX_TOKEN_PER_GPU} \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=12288 \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=12288 \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=12288 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=none \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     +actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -117,12 +121,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.temperature=1 \
     actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${NGPUS_PER_NODE} \
-    actor_rollout_ref.rollout.max_model_len=1024 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.max_model_len=10240 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.50 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=2048 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=18432 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.0 \
     trainer.critic_warmup=0 \

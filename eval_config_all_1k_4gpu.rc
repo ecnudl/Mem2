@@ -1,0 +1,90 @@
+#!/bin/bash
+# MemAgent Evaluation Configuration for all_1k_4gpu Training Results
+# Source this file before running evaluation: source eval_config_all_1k_4gpu.rc
+
+# ==================== Path Configuration ====================
+# Base paths
+export MEMAGENT_ROOT="/home/admin123/dl/MemAgent"
+export BASE_MODEL="/mnt/ssd2/models/Qwen2.5-7B-Instruct"
+export CHECKPOINT_BASE="${MEMAGENT_ROOT}/outputs/all_1k_4gpu"
+export MERGED_MODEL_BASE="${MEMAGENT_ROOT}/merged_models"
+export RESULT_BASE="${MEMAGENT_ROOT}/taskutils/memory_eval/results"
+export DATAROOT="${MEMAGENT_ROOT}/taskutils/memory_data/hotpotqa"
+
+# ==================== Conda Environment ====================
+export CONDA_ENV="memagent"
+export CONDA_SH="${HOME}/anaconda3/etc/profile.d/conda.sh"
+
+# ==================== GPU Configuration ====================
+# Use single GPU for evaluation (7B model fits on one GPU)
+# Training uses GPUs 4,5,6,7 - so we use GPU 0, 1, 2, or 3 for evaluation
+# Change to another GPU if needed: 0, 1, 2, or 3
+export CUDA_VISIBLE_DEVICES="3"
+
+# ==================== vLLM Service Configuration ====================
+export VLLM_PORT="8005"  # Unique port for this model
+export VLLM_HOST="127.0.0.1"
+export VLLM_MAX_MODEL_LEN="10240"  # Match training config (line 124 in 7Bnodes.sh)
+export VLLM_GPU_MEMORY_UTIL="0.75"
+export VLLM_DTYPE="bfloat16"
+
+# ==================== Evaluation Configuration ====================
+# CRITICAL: Must match training configuration from 7Bnodes.sh!
+export RECURRENT_CHUNK_SIZE="5000"           # chunk_size in training (line 76 in 7Bnodes.sh)
+export RECURRENT_MAX_NEW="1024"              # max_memorization/final_response_length (line 78-79)
+export RECURRENT_MAX_CONTEXT_LEN="120000"    # max input context length
+
+# Evaluation dataset
+export EVAL_LENGTH="100"                      # Options: 50, 100, 200, 400, 800, 1600, 3200, 6400
+export EVAL_API="recurrent"                   # Options: recurrent, recurrent-boxed, boxed
+export EVAL_N_PROC="32"                       # Concurrent requests
+export EVAL_MODEL_NAME="Qwen2.5-7B-Instruct"  # Public model id exposed via vLLM
+export SERVED_MODEL_NAME="${EVAL_MODEL_NAME}"   # Keep served id in sync with evaluation
+
+# ==================== Checkpoint Configuration ====================
+# Checkpoints to evaluate (space-separated list)
+# Your training directory has: global_step_100, global_step_200
+export CHECKPOINT_STEPS="800"
+
+# Or evaluate a single checkpoint
+# export SINGLE_CHECKPOINT="200"
+
+# ==================== Advanced Options ====================
+# Model identifier for summary file naming
+export MODEL_IDENTIFIER="all_1k_4gpu"
+
+# Whether to keep merged models after evaluation (yes/no)
+# Recommend "yes" for 7B models to avoid re-merging (time-consuming)
+export KEEP_MERGED_MODELS="yes"
+
+# Whether to force re-merge existing checkpoints (yes/no)
+export FORCE_MERGE="no"
+
+# Whether to force re-evaluate existing results (yes/no)
+export FORCE_EVAL="no"
+
+# vLLM startup wait time (seconds) - 7B model needs more time to load
+export VLLM_STARTUP_WAIT="90"
+
+# Log directory
+export LOG_DIR="${MEMAGENT_ROOT}/eval_logs_all_1k_4gpu"
+
+# ==================== Derived Variables (DO NOT EDIT) ====================
+export SERVE_PORT="${VLLM_PORT}"
+export SERVE_HOST="${VLLM_HOST}"
+export URL="http://${VLLM_HOST}:${VLLM_PORT}/v1"
+export API_KEY="memagent-eval-key"
+
+echo "MemAgent Evaluation Configuration Loaded (all_1k_4gpu Training Results):"
+echo "  - Root: ${MEMAGENT_ROOT}"
+echo "  - Base Model: ${BASE_MODEL}"
+echo "  - Checkpoint Base: ${CHECKPOINT_BASE}"
+echo "  - Results: ${RESULT_BASE}"
+echo "  - vLLM Port: ${VLLM_PORT}"
+echo "  - GPU: ${CUDA_VISIBLE_DEVICES}"
+echo "  - Chunk Size: ${RECURRENT_CHUNK_SIZE}"
+echo "  - Max New Tokens: ${RECURRENT_MAX_NEW}"
+echo "  - Eval Length: ${EVAL_LENGTH}"
+echo "  - Eval Model ID: ${EVAL_MODEL_NAME}"
+echo "  - Model Identifier: ${MODEL_IDENTIFIER}"
+echo "  - Checkpoints: ${CHECKPOINT_STEPS}"
